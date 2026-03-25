@@ -1,0 +1,33 @@
+# Build output
+/target/
+**/target/
+
+# Cargo lock for libraries (keep for binaries)
+# Cargo.lock
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Node.js (web frontend)
+node_modules/
+dist/
+.parcel-cache/
+
+# WASM build output
+pkg/
+*.wasm
+
+# Environment
+.env
+.env.local
+
+# Logs
+*.log

@@ -1,0 +1,21 @@
+[package]
+name = "rcad-core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Core CAD data structures for rCAD"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+glam = { workspace = true }
+thiserror = { workspace = true }
+parking_lot = { workspace = true }
+smallvec = { workspace = true }
+indexmap = { workspace = true }
+
+[features]
+default = []
+wasm = []

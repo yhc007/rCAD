@@ -1,0 +1,92 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/rcad-core",
+    "crates/rcad-geometry",
+    "crates/rcad-render",
+    "crates/rcad-io",
+    "crates/rcad-omniverse",
+    "crates/rcad-server",
+    "crates/rcad-wasm",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["rCAD Contributors"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/rcad/rcad"
+
+[workspace.dependencies]
+# Internal crates
+rcad-core = { path = "crates/rcad-core" }
+rcad-geometry = { path = "crates/rcad-geometry" }
+rcad-render = { path = "crates/rcad-render" }
+rcad-io = { path = "crates/rcad-io" }
+rcad-omniverse = { path = "crates/rcad-omniverse" }
+
+# WASM
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+web-sys = "0.3"
+console_error_panic_hook = "0.1"
+console_log = "1.0"
+
+# Rendering
+wgpu = "23"
+glam = { version = "0.29", features = ["serde"] }
+bytemuck = { version = "1.14", features = ["derive"] }
+
+# Geometry (truck - pure Rust B-Rep)
+# Using latest versions for compatibility
+truck-modeling = "0.6"
+truck-meshalgo = "0.4"
+truck-topology = "0.6"
+truck-polymesh = "0.6"
+truck-shapeops = "0.4"
+truck-stepio = "0.3"
+
+# File formats
+gltf = "1.4"
+stl_io = "0.7"
+obj = "0.10"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+bincode = "1.3"
+
+# Async
+tokio = { version = "1", features = ["full"] }
+futures = "0.3"
+
+# Server
+axum = "0.7"
+tower = "0.4"
+tower-http = { version = "0.5", features = ["cors", "fs", "trace"] }
+hyper = { version = "1.0", features = ["full"] }
+
+# Logging
+log = "0.4"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Error handling
+thiserror = "1.0"
+anyhow = "1.0"
+
+# Utilities
+uuid = { version = "1.7", features = ["v4", "serde"] }
+parking_lot = "0.12"
+smallvec = "1.13"
+indexmap = { version = "2.2", features = ["serde"] }
+
+[profile.release]
+lto = true
+opt-level = 3
+
+[profile.release-wasm]
+inherits = "release"
+opt-level = "s"
+lto = true

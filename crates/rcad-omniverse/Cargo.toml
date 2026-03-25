@@ -1,0 +1,41 @@
+[package]
+name = "rcad-omniverse"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "NVIDIA Omniverse connector for rCAD"
+
+[dependencies]
+rcad-core = { workspace = true }
+rcad-geometry = { workspace = true }
+rcad-io = { workspace = true }
+
+# Async
+tokio = { workspace = true }
+futures = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Error handling
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+
+# Logging
+log = { workspace = true }
+tracing = { workspace = true }
+
+# Utilities
+uuid = { workspace = true }
+parking_lot = { workspace = true }
+
+# HTTP client for Nucleus API
+reqwest = { version = "0.11", features = ["json"] }
+
+# WebSocket for live sync
+tokio-tungstenite = "0.21"
+
+[features]
+default = []

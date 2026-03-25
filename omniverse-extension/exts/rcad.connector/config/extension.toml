@@ -1,0 +1,44 @@
+[package]
+# Version of the extension
+version = "0.1.0"
+
+# Title of the extension
+title = "rCAD Connector"
+
+# Description
+description = "Connect rCAD with NVIDIA Omniverse for real-time CAD collaboration"
+
+# Authors
+authors = ["rCAD Team"]
+
+# Category
+category = "CAD"
+
+# Keywords for search
+keywords = ["CAD", "rCAD", "connector", "engineering", "design"]
+
+# Icon
+icon = "data/icon.png"
+
+# Preview image
+preview_image = "data/preview.png"
+
+# Changelog
+changelog = "data/CHANGELOG.md"
+
+# Readme
+readme = "data/README.md"
+
+# Repository
+repository = "https://github.com/rcad/rcad"
+
+[dependencies]
+"omni.ui" = {}
+"omni.usd" = {}
+"omni.kit.app" = {}
+
+[python.pipapi]
+requirements = ["aiohttp"]
+
+[[python.module]]
+name = "rcad.connector"

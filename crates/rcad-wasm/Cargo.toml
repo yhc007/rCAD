@@ -1,0 +1,66 @@
+[package]
+name = "rcad-wasm"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "WASM bindings for rCAD"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+rcad-core = { workspace = true, features = ["wasm"] }
+rcad-geometry = { workspace = true, features = ["wasm"] }
+rcad-render = { workspace = true, features = ["wasm"] }
+rcad-io = { workspace = true, features = ["wasm"] }
+
+# WASM
+wasm-bindgen = { workspace = true }
+wasm-bindgen-futures = { workspace = true }
+js-sys = { workspace = true }
+web-sys = { workspace = true, features = [
+    "Document",
+    "Window",
+    "Element",
+    "HtmlCanvasElement",
+    "console",
+    "Performance",
+    "GpuAdapter",
+    "GpuDevice",
+    "GpuQueue",
+    "GpuCanvasContext",
+    "GpuTextureFormat",
+    "Navigator",
+    "Gpu",
+    "MouseEvent",
+    "WheelEvent",
+    "KeyboardEvent",
+    "PointerEvent",
+] }
+console_error_panic_hook = { workspace = true }
+console_log = { workspace = true }
+
+# Rendering
+wgpu = { workspace = true, features = ["webgpu", "wgsl"] }
+glam = { workspace = true }
+bytemuck = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde-wasm-bindgen = "0.6"
+
+# Logging
+log = { workspace = true }
+
+# Error handling
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+
+# Utilities
+uuid = { workspace = true }
+parking_lot = { workspace = true }
+
+[features]
+default = []

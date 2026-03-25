@@ -1,0 +1,41 @@
+[package]
+name = "rcad-io"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "File format support for rCAD (STEP, IGES, STL, OBJ, glTF, USD)"
+
+[dependencies]
+rcad-core = { workspace = true }
+rcad-geometry = { workspace = true }
+
+# File formats
+gltf = { workspace = true }
+stl_io = { workspace = true }
+obj = { workspace = true }
+
+# Truck STEP I/O (for server-side)
+truck-stepio = { workspace = true, optional = true }
+
+# Math
+glam = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Error handling
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+
+# Logging
+log = { workspace = true }
+
+# Utilities
+bytemuck = { workspace = true }
+
+[features]
+default = []
+wasm = []
+step = ["truck-stepio"]
