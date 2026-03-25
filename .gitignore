@@ -23,6 +23,7 @@ dist/
 
 # WASM build output
 pkg/
+**/pkg/
 *.wasm
 
 # Environment

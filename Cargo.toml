@@ -77,7 +77,7 @@ thiserror = "1.0"
 anyhow = "1.0"
 
 # Utilities
-uuid = { version = "1.7", features = ["v4", "serde"] }
+uuid = { version = "1.7", features = ["v4", "serde", "js"] }
 parking_lot = "0.12"
 smallvec = "1.13"
 indexmap = { version = "2.2", features = ["serde"] }

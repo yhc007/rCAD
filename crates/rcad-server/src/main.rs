@@ -31,11 +31,16 @@ async fn main() {
     // Build application
     let app = create_router();
 
-    // Run server
-    let addr = SocketAddr::from(([0, 0, 0, 0], 3000));
+    // Run server - try port from env or default to 3001
+    let port: u16 = std::env::var("PORT")
+        .ok()
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(3001);
+    let addr = SocketAddr::from(([0, 0, 0, 0], port));
     tracing::info!("rCAD Server listening on {}", addr);
 
-    let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
+    let listener = tokio::net::TcpListener::bind(addr).await
+        .expect(&format!("Failed to bind to port {}", port));
     axum::serve(listener, app).await.unwrap();
 }
 
