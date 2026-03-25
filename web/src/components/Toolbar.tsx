@@ -6,7 +6,7 @@ import {
   Cone,
   Minus,
   Plus,
-  Intersect,
+  Layers,
   Undo,
   Redo,
   Save,
@@ -122,7 +122,7 @@ export function Toolbar() {
       <ToolbarGroup>
         <ToolbarButton icon={<Plus size={18} />} label="Union" />
         <ToolbarButton icon={<Minus size={18} />} label="Subtract" />
-        <ToolbarButton icon={<Intersect size={18} />} label="Intersect" />
+        <ToolbarButton icon={<Layers size={18} />} label="Intersect" />
       </ToolbarGroup>
 
       <div className="flex-1" />

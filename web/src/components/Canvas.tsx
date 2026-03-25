@@ -5,7 +5,7 @@ import { useDocumentStore } from '../stores/documentStore';
 export function Canvas() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
-  const { initialize, render, resize, orbit, pan, zoom, isReady } = useWebGPU();
+  const { initialize, render, resize, orbit, pan, zoom, isReady, error, rendererType } = useWebGPU();
   const { selectedFeature } = useDocumentStore();
 
   // Track mouse state
@@ -131,7 +131,7 @@ export function Canvas() {
   return (
     <div
       ref={containerRef}
-      className="w-full h-full"
+      className="w-full h-full relative"
       onContextMenu={(e) => e.preventDefault()}
     >
       <canvas
@@ -143,6 +143,21 @@ export function Canvas() {
         onMouseLeave={handleMouseUp}
         onWheel={handleWheel}
       />
+
+      {/* WebGPU Error Fallback */}
+      {error && (
+        <div className="absolute inset-0 flex items-center justify-center bg-cad-bg/90">
+          <div className="max-w-md p-6 bg-cad-panel border border-cad-border rounded-lg text-center">
+            <div className="text-yellow-500 text-4xl mb-4">⚠️</div>
+            <h3 className="text-lg font-semibold text-cad-text mb-2">WebGPU Not Available</h3>
+            <p className="text-cad-text-muted text-sm mb-4">{error}</p>
+            <p className="text-cad-text-muted text-xs">
+              The CAD modeling engine (WASM) is still functional.
+              3D rendering requires WebGPU support.
+            </p>
+          </div>
+        </div>
+      )}
 
       {/* View Controls Overlay */}
       <div className="absolute bottom-4 left-4 flex gap-2">
@@ -156,6 +171,13 @@ export function Canvas() {
       <div className="absolute bottom-4 right-4 w-16 h-16">
         <CoordinateGizmo />
       </div>
+
+      {/* Renderer indicator */}
+      {rendererType && (
+        <div className="absolute top-4 right-4 px-2 py-1 bg-cad-panel/80 border border-cad-border rounded text-xs text-cad-text-muted">
+          {rendererType === 'webgpu' ? '🚀 WebGPU' : '🔷 WebGL'}
+        </div>
+      )}
     </div>
   );
 }

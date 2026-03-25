@@ -54,7 +54,7 @@ async function loadWasm(): Promise<CADModule> {
   wasmLoading = true;
   try {
     // Dynamic import of the WASM module
-    const module = await import('../../pkg/rcad_wasm.js');
+    const module = await import('../wasm/pkg/rcad_wasm.js');
     await module.default();
     wasmModule = module as unknown as CADModule;
     console.log('rCAD WASM loaded, version:', wasmModule.version());
