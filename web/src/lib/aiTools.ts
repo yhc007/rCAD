@@ -8,6 +8,7 @@
 import { cad } from '../hooks/useCAD';
 import { useDocumentStore, type Feature } from '../stores/documentStore';
 import type { MeshGeometry } from './meshParsers';
+import { runSimulation } from './physics';
 
 // --- Anthropic tool definitions ---------------------------------------------
 
@@ -126,6 +127,51 @@ export const AI_TOOLS: ToolDef[] = [
       properties: { id: { type: 'string' } },
       required: ['id'],
     },
+  },
+  {
+    name: 'duplicate_feature',
+    description:
+      'Duplicate a part `count` times (default 1), each copy offset from the original by (dx,dy,dz) mm × its index — i.e. a linear array. Returns the new ids.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        id: { type: 'string' },
+        count: { type: 'number', description: 'number of copies (default 1)' },
+        dx: num, dy: num, dz: num,
+      },
+      required: ['id'],
+    },
+  },
+  {
+    name: 'align',
+    description:
+      'Move a part along one axis so its min / center / max edge lines up with another part\'s min / center / max on that axis.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        id: { type: 'string' },
+        reference_id: { type: 'string' },
+        axis: { type: 'string', enum: ['x', 'y', 'z'] },
+        mode: { type: 'string', enum: ['min', 'center', 'max'] },
+      },
+      required: ['id', 'reference_id', 'axis', 'mode'],
+    },
+  },
+  {
+    name: 'stack_on',
+    description:
+      'Place a part centred on top of a base part: matches X/Z centres and sets the part\'s bottom to the base\'s top (+ optional gap mm). Ideal for assemblies.',
+    input_schema: {
+      type: 'object',
+      properties: { id: { type: 'string' }, base_id: { type: 'string' }, gap: num },
+      required: ['id', 'base_id'],
+    },
+  },
+  {
+    name: 'simulate_physics',
+    description:
+      'Run a Newton rigid-body drop test on the current model and start playback for the user. Parts marked fixed are anchors; the rest fall under gravity. Returns, per part, its start/end height, whether it settled, and how far it moved — use this to answer "does it stand / stay?" and iterate.',
+    input_schema: { type: 'object', properties: {} },
   },
   {
     name: 'select_feature',
@@ -296,8 +342,104 @@ export async function executeTool(name: string, input: Input): Promise<unknown> 
           return { error: data.error || data.message || `generation failed (${res.status})` };
         }
         const name = prompt.length > 32 ? prompt.slice(0, 32) + '…' : prompt;
-        const id = await cad.importMesh(name, deindexServer(data));
-        return { id, bbox: bboxOf(id) };
+        const color = Array.isArray(data.color) && data.color.length === 3 ? (data.color as [number, number, number]) : undefined;
+        const id = await cad.importMesh(name, deindexServer(data), color);
+        return { id, bbox: bboxOf(id), color };
+      }
+
+      case 'duplicate_feature': {
+        const id = String(input.id);
+        const f = store.features.find((x) => x.id === id);
+        if (!f) return { error: `no feature ${id}` };
+        const count = Math.max(1, Math.min(20, Number(input.count) || 1));
+        const off = [Number(input.dx) || 0, Number(input.dy) || 0, Number(input.dz) || 0];
+        const prim = f.type.toLowerCase();
+        const isPrim = ['box', 'cylinder', 'sphere', 'cone'].includes(prim);
+        const ids: string[] = [];
+        for (let k = 1; k <= count; k++) {
+          const t = [off[0] * k, off[1] * k, off[2] * k];
+          let nid: string;
+          if (isPrim) {
+            nid = await cad.addPrimitive(prim, f.params ?? []);
+            if (f.color) await cad.setFeatureProps(nid, { color: f.color });
+            const pos = f.position ?? [0, 0, 0];
+            const mv = [pos[0] + t[0], pos[1] + t[1], pos[2] + t[2]];
+            if (mv.some((v) => v)) await cad.moveFeature(nid, mv[0], mv[1], mv[2]);
+            const rot = f.rotation ?? [0, 0, 0];
+            for (let a = 0; a < 3; a++) if (rot[a]) await cad.spinFeature(nid, a, (rot[a] * Math.PI) / 180);
+          } else {
+            // Clone the already-placed mesh, then apply just the array offset.
+            nid = await cad.importMesh(`${f.name} copy`, store.meshes[id], f.color);
+            if (t.some((v) => v)) await cad.moveFeature(nid, t[0], t[1], t[2]);
+          }
+          ids.push(nid);
+        }
+        return { ids };
+      }
+
+      case 'align': {
+        const a = bboxOf(String(input.id));
+        const b = bboxOf(String(input.reference_id));
+        if (!a || !b) return { error: 'both features need geometry' };
+        const axis = AXIS[String(input.axis)] ?? 0;
+        const mode = String(input.mode ?? 'center');
+        const edge = (bb: { min: number[]; max: number[] }) =>
+          mode === 'min' ? bb.min[axis] : mode === 'max' ? bb.max[axis] : (bb.min[axis] + bb.max[axis]) / 2;
+        const delta = edge(b) - edge(a);
+        const d = [0, 0, 0];
+        d[axis] = delta;
+        await cad.moveFeature(String(input.id), d[0], d[1], d[2]);
+        return { id: input.id, movedBy: Math.round(delta * 100) / 100 };
+      }
+
+      case 'stack_on': {
+        const a = bboxOf(String(input.id));
+        const b = bboxOf(String(input.base_id));
+        if (!a || !b) return { error: 'both features need geometry' };
+        const gap = Number(input.gap) || 0;
+        const dx = (b.min[0] + b.max[0]) / 2 - (a.min[0] + a.max[0]) / 2;
+        const dz = (b.min[2] + b.max[2]) / 2 - (a.min[2] + a.max[2]) / 2;
+        const dy = b.max[1] + gap - a.min[1];
+        await cad.moveFeature(String(input.id), dx, dy, dz);
+        return { id: input.id, placedOn: input.base_id };
+      }
+
+      case 'simulate_physics': {
+        const meshes = store.meshes;
+        if (Object.keys(meshes).length === 0) return { error: 'no geometry to simulate' };
+        const props = Object.fromEntries(
+          store.features.map((f) => [
+            f.id,
+            { type: f.type, fixed: !!f.fixed, mass: f.mass ?? 0, rotated: !!f.rotation?.some((v) => v !== 0) },
+          ])
+        );
+        let sim;
+        try {
+          sim = await runSimulation(meshes, props);
+        } catch (e) {
+          return { error: `${e instanceof Error ? e.message : 'simulation failed'} (is the Newton service on :8000?)` };
+        }
+        useDocumentStore.getState().startSimulation(sim);
+        const last = sim.frames.length - 1;
+        const prev = Math.max(0, last - 5);
+        const parts = sim.bodyIds.map((id, b) => {
+          const f = store.features.find((x) => x.id === id);
+          const y0 = sim.frames[0][b][1];
+          const yL = sim.frames[last][b][1];
+          const p0 = sim.frames[0][b];
+          const pL = sim.frames[last][b];
+          return {
+            id,
+            name: f?.name,
+            fixed: !!f?.fixed,
+            startY: Math.round(y0 * 10) / 10,
+            endY: Math.round(yL * 10) / 10,
+            dropped: Math.round((y0 - yL) * 10) / 10,
+            settled: Math.abs(yL - sim.frames[prev][b][1]) < 0.5,
+            horizontalMove: Math.round(Math.hypot(pL[0] - p0[0], pL[2] - p0[2]) * 10) / 10,
+          };
+        });
+        return { frames: sim.frames.length, parts };
       }
 
       case 'boolean_op': {

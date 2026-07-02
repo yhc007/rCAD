@@ -456,9 +456,9 @@ export const cad = {
     await dispatch({ kind: 'boolean', id, op, targetId, toolId, name: label, type: label, color: nextColor() });
     return id;
   },
-  importMesh: async (name: string, geometry: MeshGeometry) => {
+  importMesh: async (name: string, geometry: MeshGeometry, color?: RGB) => {
     const id = crypto.randomUUID();
-    await dispatch({ kind: 'import', id, name, geometry, color: nextColor() });
+    await dispatch({ kind: 'import', id, name, geometry, color: color ?? nextColor() });
     return id;
   },
 

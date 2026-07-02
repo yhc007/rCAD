@@ -72,6 +72,7 @@ pub async fn generate(Json(req): Json<GenerateRequest>) -> impl IntoResponse {
         Ok(m) => m,
         Err(e) => return bad(StatusCode::UNPROCESSABLE_ENTITY, format!("glTF parse failed: {e}")),
     };
+    let materials = model.materials;
     let mut meshes: Vec<Mesh> = model.meshes.into_iter().map(|m| m.mesh).collect();
     if meshes.is_empty() {
         return bad(StatusCode::UNPROCESSABLE_ENTITY, "generated model had no meshes");
@@ -80,7 +81,24 @@ pub async fn generate(Json(req): Json<GenerateRequest>) -> impl IntoResponse {
 
     let resp = merge_meshes(&meshes);
     tracing::info!("Tripo import: {} verts, {} tris", resp.vertex_count, resp.triangle_count);
-    (StatusCode::OK, Json(serde_json::to_value(resp).unwrap()))
+    // Reflect the generated model's base material colour when it is meaningful.
+    let mut value = serde_json::to_value(resp).unwrap();
+    if let Some(c) = pick_material_color(&materials) {
+        value["color"] = json!(c);
+    }
+    (StatusCode::OK, Json(value))
+}
+
+/// First material colour that isn't the near-white glTF default.
+fn pick_material_color(mats: &[rcad_io::ImportedMaterial]) -> Option<[f32; 3]> {
+    for m in mats {
+        let c = m.base_color;
+        if c[0] > 0.92 && c[1] > 0.92 && c[2] > 0.92 {
+            continue;
+        }
+        return Some([c[0], c[1], c[2]]);
+    }
+    None
 }
 
 async fn create_task(client: &reqwest::Client, key: &str, prompt: &str) -> Result<String, String> {
