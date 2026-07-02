@@ -5,7 +5,7 @@ import { runTurn, type Msg, type ToolCall } from '../lib/aiAgent';
 
 type Item =
   | { kind: 'user'; text: string }
-  | { kind: 'assistant'; text: string }
+  | { kind: 'assistant'; id: string; text: string }
   | { kind: 'error'; text: string }
   | { kind: 'action'; id: string; name: string; input: Record<string, unknown>; status: 'running' | 'done'; result?: unknown };
 
@@ -21,6 +21,7 @@ export function AiPanel({ open, onClose }: { open: boolean; onClose: () => void 
   const [busy, setBusy] = React.useState(false);
   const [pending, setPending] = React.useState<{ call: ToolCall; resolve: (ok: boolean) => void } | null>(null);
   const historyRef = React.useRef<Msg[]>([]);
+  const streamIdRef = React.useRef<string | null>(null); // active streaming assistant bubble
   const scrollRef = React.useRef<HTMLDivElement>(null);
   const selectFeature = useDocumentStore((s) => s.selectFeature);
 
@@ -34,21 +35,40 @@ export function AiPanel({ open, onClose }: { open: boolean; onClose: () => void 
     setInput('');
     setItems((prev) => [...prev, { kind: 'user', text: q }]);
     setBusy(true);
+    streamIdRef.current = null;
     try {
       historyRef.current = await runTurn(historyRef.current, q, {
-        onAssistantText: (t) => setItems((p) => [...p, { kind: 'assistant', text: t }]),
-        onToolCall: (c) =>
-          setItems((p) => [...p, { kind: 'action', id: c.id, name: c.name, input: c.input, status: 'running' }]),
+        onAssistantDelta: (chunk) =>
+          setItems((p) => {
+            // Append to the active streaming bubble, or start a new one.
+            if (streamIdRef.current) {
+              const id = streamIdRef.current;
+              return p.map((it) =>
+                it.kind === 'assistant' && it.id === id ? { ...it, text: it.text + chunk } : it
+              );
+            }
+            const id = crypto.randomUUID();
+            streamIdRef.current = id;
+            return [...p, { kind: 'assistant', id, text: chunk }];
+          }),
+        onToolCall: (c) => {
+          streamIdRef.current = null; // next text starts a fresh bubble
+          setItems((p) => [...p, { kind: 'action', id: c.id, name: c.name, input: c.input, status: 'running' }]);
+        },
         onToolResult: (id, result) =>
           setItems((p) =>
             p.map((it) => (it.kind === 'action' && it.id === id ? { ...it, status: 'done', result } : it))
           ),
         requestApproval: (call) => new Promise<boolean>((resolve) => setPending({ call, resolve })),
-        onError: (m) => setItems((p) => [...p, { kind: 'error', text: m }]),
+        onError: (m) => {
+          streamIdRef.current = null;
+          setItems((p) => [...p, { kind: 'error', text: m }]);
+        },
       });
     } finally {
       setBusy(false);
       setPending(null);
+      streamIdRef.current = null;
     }
   };
 

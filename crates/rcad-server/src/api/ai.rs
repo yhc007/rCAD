@@ -7,7 +7,12 @@
 //! and forwards it. The agent loop (tool execution against the live document)
 //! runs client-side, so this stays stateless.
 
-use axum::{http::StatusCode, response::IntoResponse, Json};
+use axum::{
+    body::Body,
+    http::StatusCode,
+    response::{IntoResponse, Response},
+    Json,
+};
 use serde_json::{json, Value};
 use std::{env, fs};
 
@@ -27,27 +32,26 @@ pub fn read_key(filename: &str) -> Option<String> {
     }
 }
 
+fn err(status: StatusCode, msg: &str) -> Response {
+    (status, Json(json!({ "error": msg }))).into_response()
+}
+
 /// `POST /api/ai/chat` — forward an OpenAI-style chat request to GLM with the
-/// server-side key. Body is the request as-is; we only sanitize it.
-pub async fn chat(Json(mut body): Json<Value>) -> impl IntoResponse {
+/// server-side key. Supports streaming (SSE passthrough) when the client sets
+/// `stream: true`. Body is the request as-is; we only sanitize it.
+pub async fn chat(Json(mut body): Json<Value>) -> Response {
     let Some(key) = read_key(".GLM") else {
-        return (
+        return err(
             StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({
-                "error": "AI is not configured: put the GLM API key in ~/.GLM on the server."
-            })),
+            "AI is not configured: put the GLM API key in ~/.GLM on the server.",
         );
     };
-
     if !body.is_object() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({ "error": "request body must be a JSON object (a chat request)" })),
-        );
+        return err(StatusCode::BAD_REQUEST, "request body must be a JSON object");
     }
     let obj = body.as_object_mut().unwrap();
 
-    // Guardrails: only GLM models, bounded output, non-streaming for now.
+    // Guardrails: only GLM models, bounded output.
     let model_ok = obj
         .get("model")
         .and_then(|m| m.as_str())
@@ -61,13 +65,10 @@ pub async fn chat(Json(mut body): Json<Value>) -> impl IntoResponse {
         "max_tokens".into(),
         json!(if max_tokens == 0 { 4096 } else { max_tokens.min(MAX_TOKENS_CAP) }),
     );
-    obj.insert("stream".into(), json!(false));
     if obj.get("messages").and_then(|m| m.as_array()).is_none() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({ "error": "request needs a non-empty `messages` array" })),
-        );
+        return err(StatusCode::BAD_REQUEST, "request needs a `messages` array");
     }
+    let streaming = obj.get("stream").and_then(|v| v.as_bool()).unwrap_or(false);
 
     let url = env::var("GLM_BASE_URL").unwrap_or_else(|_| DEFAULT_URL.to_string());
     let client = reqwest::Client::new();
@@ -79,19 +80,35 @@ pub async fn chat(Json(mut body): Json<Value>) -> impl IntoResponse {
         .send()
         .await;
 
-    match upstream {
-        Ok(resp) => {
-            let status =
-                StatusCode::from_u16(resp.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
-            let payload = resp
-                .json::<Value>()
-                .await
-                .unwrap_or_else(|e| json!({ "error": format!("invalid upstream response: {e}") }));
-            (status, Json(payload))
-        }
-        Err(e) => (
-            StatusCode::BAD_GATEWAY,
-            Json(json!({ "error": format!("failed to reach GLM API: {e}") })),
-        ),
+    let resp = match upstream {
+        Ok(r) => r,
+        Err(e) => return err(StatusCode::BAD_GATEWAY, &format!("failed to reach GLM API: {e}")),
+    };
+    let status = StatusCode::from_u16(resp.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+
+    // On an upstream error (non-2xx) return the body as JSON so the client can
+    // show it, whether or not streaming was requested.
+    if !status.is_success() {
+        let payload = resp
+            .json::<Value>()
+            .await
+            .unwrap_or_else(|e| json!({ "error": format!("upstream error: {e}") }));
+        return (status, Json(payload)).into_response();
+    }
+
+    if streaming {
+        // Pipe the SSE stream straight through to the browser.
+        Response::builder()
+            .status(status)
+            .header("content-type", "text/event-stream")
+            .header("cache-control", "no-cache")
+            .body(Body::from_stream(resp.bytes_stream()))
+            .unwrap()
+    } else {
+        let payload = resp
+            .json::<Value>()
+            .await
+            .unwrap_or_else(|e| json!({ "error": format!("invalid upstream response: {e}") }));
+        (status, Json(payload)).into_response()
     }
 }

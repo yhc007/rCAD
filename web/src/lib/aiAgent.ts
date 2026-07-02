@@ -57,10 +57,11 @@ export interface ToolCall {
 }
 
 export interface AgentCallbacks {
-  onAssistantText: (text: string) => void;
+  // Streaming assistant text — one chunk at a time.
+  onAssistantDelta: (textChunk: string) => void;
   onToolCall: (call: ToolCall) => void;
   onToolResult: (id: string, result: unknown) => void;
-  // Destructive tools (boolean_op, delete_feature) pause here for user approval.
+  // Approval-gated tools pause here for user approval.
   requestApproval: (call: ToolCall) => Promise<boolean>;
   onError: (message: string) => void;
 }
@@ -71,7 +72,15 @@ interface ModelResult {
   error?: string;
 }
 
-async function callModel(messages: Msg[]): Promise<ModelResult> {
+interface ToolAcc {
+  id: string;
+  name: string;
+  args: string;
+}
+
+// Stream the GLM response (SSE), emitting text deltas live and accumulating any
+// tool calls, then return the assembled assistant message.
+async function callModel(messages: Msg[], onDelta: (t: string) => void): Promise<ModelResult> {
   let res: Response;
   try {
     res = await fetch('/api/ai/chat', {
@@ -80,6 +89,7 @@ async function callModel(messages: Msg[]): Promise<ModelResult> {
       body: JSON.stringify({
         model: MODEL,
         max_tokens: 2048,
+        stream: true,
         messages: [{ role: 'system', content: SYSTEM_PROMPT }, ...messages],
         tools: OPENAI_TOOLS,
         tool_choice: 'auto',
@@ -88,23 +98,79 @@ async function callModel(messages: Msg[]): Promise<ModelResult> {
   } catch (e) {
     return { message: null, finish: '', error: e instanceof Error ? e.message : 'network error' };
   }
-  let data: Record<string, unknown>;
-  try {
-    data = await res.json();
-  } catch {
-    return { message: null, finish: '', error: `server returned ${res.status}` };
-  }
-  const errField = data.error as unknown;
-  if (!res.ok || errField) {
-    const msg =
-      typeof errField === 'string'
-        ? errField
-        : (errField as { message?: string })?.message || `server returned ${res.status}`;
+
+  // Errors come back as JSON (not a stream).
+  if (!res.ok || !res.body || !res.headers.get('content-type')?.includes('event-stream')) {
+    let msg = `server returned ${res.status}`;
+    try {
+      const data = await res.json();
+      const e = data.error as unknown;
+      msg = typeof e === 'string' ? e : (e as { message?: string })?.message || msg;
+    } catch {
+      /* keep default */
+    }
     return { message: null, finish: '', error: msg };
   }
-  const choice = (data.choices as Array<{ message: Msg; finish_reason: string }> | undefined)?.[0];
-  if (!choice) return { message: null, finish: '', error: 'no choices in model response' };
-  return { message: choice.message, finish: choice.finish_reason ?? '' };
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let content = '';
+  let finish = '';
+  const tools = new Map<number, ToolAcc>();
+
+  const handle = (data: string) => {
+    if (data === '[DONE]') return;
+    let obj: { choices?: Array<{ delta?: Record<string, unknown>; finish_reason?: string }> };
+    try {
+      obj = JSON.parse(data);
+    } catch {
+      return;
+    }
+    const choice = obj.choices?.[0];
+    if (!choice) return;
+    const delta = choice.delta ?? {};
+    if (typeof delta.content === 'string' && delta.content) {
+      content += delta.content;
+      onDelta(delta.content);
+    }
+    const deltaTools = delta.tool_calls as
+      | Array<{ index?: number; id?: string; function?: { name?: string; arguments?: string } }>
+      | undefined;
+    if (deltaTools) {
+      for (const tc of deltaTools) {
+        const idx = tc.index ?? 0;
+        const cur = tools.get(idx) ?? { id: '', name: '', args: '' };
+        if (tc.id) cur.id = tc.id;
+        if (tc.function?.name) cur.name = tc.function.name;
+        if (tc.function?.arguments) cur.args += tc.function.arguments;
+        tools.set(idx, cur);
+      }
+    }
+    if (choice.finish_reason) finish = choice.finish_reason;
+  };
+
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    let nl: number;
+    while ((nl = buffer.indexOf('\n')) >= 0) {
+      const line = buffer.slice(0, nl).trim();
+      buffer = buffer.slice(nl + 1);
+      if (line.startsWith('data:')) handle(line.slice(5).trim());
+    }
+  }
+
+  const tool_calls = [...tools.entries()]
+    .sort((a, b) => a[0] - b[0])
+    .map(([, v]) => ({ id: v.id, type: 'function', function: { name: v.name, arguments: v.args } }));
+  const message: Msg = {
+    role: 'assistant',
+    content: content || null,
+    ...(tool_calls.length ? { tool_calls } : {}),
+  };
+  return { message, finish };
 }
 
 /** Run one user turn to completion, returning the updated conversation history. */
@@ -121,14 +187,14 @@ export async function runTurn(
   ];
 
   for (let iter = 0; iter < MAX_ITERS; iter++) {
-    const res = await callModel(messages);
+    const res = await callModel(messages, cb.onAssistantDelta);
     if (res.error || !res.message) {
       cb.onError(res.error || 'empty model response');
       return messages;
     }
     const msg = res.message;
     messages.push(msg);
-    if (msg.content && msg.content.trim()) cb.onAssistantText(msg.content);
+    // Text was already streamed via onAssistantDelta.
 
     const toolCalls = msg.tool_calls ?? [];
     if (toolCalls.length === 0) return messages; // model is done
