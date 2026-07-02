@@ -15,6 +15,10 @@ gltf = { workspace = true }
 stl_io = { workspace = true }
 obj = { workspace = true }
 
+# Decode base-color textures (PNG/JPEG) to average a generated model's colour
+# (server-side only — kept off the WASM build via the `textures` feature).
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"], optional = true }
+
 # Truck STEP I/O + tessellation (for server-side STEP import)
 truck-stepio = { workspace = true, optional = true }
 truck-meshalgo = { workspace = true, optional = true }
@@ -42,3 +46,5 @@ bytemuck = { workspace = true }
 default = []
 wasm = []
 step = ["truck-stepio", "truck-meshalgo", "truck-topology", "truck-polymesh"]
+# Base-color texture averaging for imported glTF (server-side).
+textures = ["image"]

@@ -9,7 +9,7 @@ description = "Backend server for rCAD with OpenCASCADE and Omniverse support"
 [dependencies]
 rcad-core = { workspace = true }
 rcad-geometry = { workspace = true }
-rcad-io = { workspace = true, features = ["step"] }
+rcad-io = { workspace = true, features = ["step", "textures"] }
 rcad-omniverse = { workspace = true }
 
 # Server framework

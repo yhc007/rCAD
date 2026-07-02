@@ -89,11 +89,13 @@ pub async fn generate(Json(req): Json<GenerateRequest>) -> impl IntoResponse {
     (StatusCode::OK, Json(value))
 }
 
-/// First material colour that isn't the near-white glTF default.
+/// First material colour that isn't essentially pure white (the untextured
+/// glTF default). base_color now carries the averaged texture colour when the
+/// model is textured, so most generated models yield a real colour here.
 fn pick_material_color(mats: &[rcad_io::ImportedMaterial]) -> Option<[f32; 3]> {
     for m in mats {
         let c = m.base_color;
-        if c[0] > 0.92 && c[1] > 0.92 && c[2] > 0.92 {
+        if c[0] > 0.97 && c[1] > 0.97 && c[2] > 0.97 {
             continue;
         }
         return Some([c[0], c[1], c[2]]);

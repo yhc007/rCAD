@@ -7,6 +7,50 @@ use crate::{
 use rcad_geometry::Mesh;
 use std::io::{Read, Write};
 
+/// Average colour (0..1) of a material's base-colour texture, if one is embedded
+/// in the glTF buffers. Server-side only (gated so the WASM build stays lean).
+#[cfg(feature = "textures")]
+fn base_texture_average(material: &gltf::Material, buffers: &[Vec<u8>]) -> Option<[f32; 3]> {
+    let info = material.pbr_metallic_roughness().base_color_texture()?;
+    let bytes: &[u8] = match info.texture().source().source() {
+        gltf::image::Source::View { view, .. } => {
+            let buf = buffers.get(view.buffer().index())?;
+            let start = view.offset();
+            buf.get(start..start + view.length())?
+        }
+        gltf::image::Source::Uri { .. } => return None, // GLB embeds via buffer views
+    };
+    let rgb = image::load_from_memory(bytes).ok()?.to_rgb8();
+    let (w, h) = rgb.dimensions();
+    if w == 0 || h == 0 {
+        return None;
+    }
+    // Sample ~4k pixels for a fast average.
+    let step = (((w as u64 * h as u64) / 4096).max(1)) as usize;
+    let (mut sr, mut sg, mut sb, mut n) = (0u64, 0u64, 0u64, 0u64);
+    for (i, p) in rgb.pixels().enumerate() {
+        if i % step != 0 {
+            continue;
+        }
+        sr += p[0] as u64;
+        sg += p[1] as u64;
+        sb += p[2] as u64;
+        n += 1;
+    }
+    (n > 0).then(|| {
+        [
+            sr as f32 / n as f32 / 255.0,
+            sg as f32 / n as f32 / 255.0,
+            sb as f32 / n as f32 / 255.0,
+        ]
+    })
+}
+
+#[cfg(not(feature = "textures"))]
+fn base_texture_average(_material: &gltf::Material, _buffers: &[Vec<u8>]) -> Option<[f32; 3]> {
+    None
+}
+
 /// Import a glTF file
 pub fn import<R: Read>(mut reader: R, options: &ImportOptions) -> Result<ImportedModel> {
     let mut data = Vec::new();
@@ -24,9 +68,18 @@ pub fn import<R: Read>(mut reader: R, options: &ImportOptions) -> Result<Importe
     for material in gltf.materials() {
         let pbr = material.pbr_metallic_roughness();
 
+        // If the base colour lives in a texture (as for Tripo-generated models),
+        // fold its average into base_color so downstream consumers get a real
+        // colour instead of the usually-white base_color_factor.
+        let factor = pbr.base_color_factor();
+        let base_color = match base_texture_average(&material, &buffers) {
+            Some(avg) => [avg[0] * factor[0], avg[1] * factor[1], avg[2] * factor[2], factor[3]],
+            None => factor,
+        };
+
         let imported_material = ImportedMaterial {
             name: material.name().unwrap_or("Unnamed").to_string(),
-            base_color: pbr.base_color_factor(),
+            base_color,
             metallic: pbr.metallic_factor(),
             roughness: pbr.roughness_factor(),
             emissive: material.emissive_factor(),
