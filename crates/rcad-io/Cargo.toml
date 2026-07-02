@@ -15,8 +15,11 @@ gltf = { workspace = true }
 stl_io = { workspace = true }
 obj = { workspace = true }
 
-# Truck STEP I/O (for server-side)
+# Truck STEP I/O + tessellation (for server-side STEP import)
 truck-stepio = { workspace = true, optional = true }
+truck-meshalgo = { workspace = true, optional = true }
+truck-topology = { workspace = true, optional = true }
+truck-polymesh = { workspace = true, optional = true }
 
 # Math
 glam = { workspace = true }
@@ -38,4 +41,4 @@ bytemuck = { workspace = true }
 [features]
 default = []
 wasm = []
-step = ["truck-stepio"]
+step = ["truck-stepio", "truck-meshalgo", "truck-topology", "truck-polymesh"]

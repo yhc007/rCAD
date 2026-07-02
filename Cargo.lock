@@ -2064,7 +2064,10 @@ dependencies = [
  "serde_json",
  "stl_io",
  "thiserror",
+ "truck-meshalgo",
+ "truck-polymesh",
  "truck-stepio",
+ "truck-topology",
 ]
 
 [[package]]

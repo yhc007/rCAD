@@ -9,6 +9,7 @@ mod api;
 mod services;
 
 use axum::{
+    extract::DefaultBodyLimit,
     routing::{get, post},
     Router,
 };
@@ -57,6 +58,9 @@ pub fn create_router() -> Router {
         .route("/health", get(health_check))
         // API routes
         .nest("/api", api_routes())
+        // Allow large uploads — STEP assemblies routinely run tens of MB, well
+        // past Axum's 2 MB default (which silently rejected big imports).
+        .layer(DefaultBodyLimit::max(512 * 1024 * 1024))
         // Middleware
         .layer(TraceLayer::new_for_http())
         .layer(cors)

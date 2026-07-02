@@ -1,135 +1,112 @@
 //! Import API endpoints
 
-use axum::{
-    http::StatusCode,
-    response::IntoResponse,
-    Json,
-};
+use axum::{response::IntoResponse, Json};
 use axum_extra::extract::Multipart;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
-/// Import response
-#[derive(Debug, Serialize)]
+/// Import response: a merged triangle mesh ready for the client renderer.
+#[derive(Debug, Serialize, Default)]
 pub struct ImportResponse {
     pub success: bool,
     pub message: String,
-    pub geometry_id: Option<String>,
-    pub vertex_count: Option<usize>,
-    pub face_count: Option<usize>,
+    pub positions: Vec<f32>,
+    pub normals: Vec<f32>,
+    pub indices: Vec<u32>,
+    pub vertex_count: usize,
+    pub triangle_count: usize,
 }
 
-/// Import STEP file
+impl ImportResponse {
+    fn error(message: impl Into<String>) -> Self {
+        Self {
+            success: false,
+            message: message.into(),
+            ..Default::default()
+        }
+    }
+}
+
+/// Read the `file` field's bytes from a multipart form.
+async fn read_file_field(multipart: &mut Multipart) -> Option<Vec<u8>> {
+    while let Some(field) = multipart.next_field().await.unwrap_or(None) {
+        if field.name() == Some("file") {
+            return Some(field.bytes().await.unwrap_or_default().to_vec());
+        }
+    }
+    None
+}
+
+/// Merge a list of meshes into one (concatenate, offsetting indices).
+fn merge_meshes(meshes: &[rcad_geometry::Mesh]) -> ImportResponse {
+    let mut positions = Vec::new();
+    let mut normals = Vec::new();
+    let mut indices = Vec::new();
+    for mesh in meshes {
+        let base = (positions.len() / 3) as u32;
+        positions.extend_from_slice(&mesh.positions);
+        normals.extend_from_slice(&mesh.normals);
+        indices.extend(mesh.indices.iter().map(|i| i + base));
+    }
+    ImportResponse {
+        success: true,
+        message: "imported".to_string(),
+        vertex_count: positions.len() / 3,
+        triangle_count: indices.len() / 3,
+        positions,
+        normals,
+        indices,
+    }
+}
+
+/// Import a STEP file → tessellated mesh (truck-stepio, pure Rust).
 pub async fn import_step(mut multipart: Multipart) -> impl IntoResponse {
-    while let Some(field) = multipart.next_field().await.unwrap_or(None) {
-        let name = field.name().unwrap_or("").to_string();
+    let Some(data) = read_file_field(&mut multipart).await else {
+        return Json(ImportResponse::error("No file provided"));
+    };
+    tracing::info!("Importing STEP file, {} bytes", data.len());
 
-        if name == "file" {
-            let data = field.bytes().await.unwrap_or_default();
-
-            // In a real implementation, we would:
-            // 1. Save to temp file
-            // 2. Parse with OpenCASCADE (truck-stepio)
-            // 3. Convert to internal format
-            // 4. Return geometry data
-
-            tracing::info!("Received STEP file, {} bytes", data.len());
-
-            return Json(ImportResponse {
-                success: true,
-                message: "STEP file imported successfully".to_string(),
-                geometry_id: Some(uuid::Uuid::new_v4().to_string()),
-                vertex_count: Some(0),
-                face_count: Some(0),
-            });
+    match rcad_io::step::import_from_bytes(&data) {
+        Ok(meshes) => {
+            let resp = merge_meshes(&meshes);
+            tracing::info!(
+                "STEP imported: {} vertices, {} triangles",
+                resp.vertex_count,
+                resp.triangle_count
+            );
+            Json(resp)
+        }
+        Err(e) => {
+            tracing::warn!("STEP import failed: {e}");
+            Json(ImportResponse::error(format!("STEP import failed: {e}")))
         }
     }
-
-    Json(ImportResponse {
-        success: false,
-        message: "No file provided".to_string(),
-        geometry_id: None,
-        vertex_count: None,
-        face_count: None,
-    })
 }
 
-/// Import IGES file
-pub async fn import_iges(mut multipart: Multipart) -> impl IntoResponse {
-    while let Some(field) = multipart.next_field().await.unwrap_or(None) {
-        let name = field.name().unwrap_or("").to_string();
-
-        if name == "file" {
-            let data = field.bytes().await.unwrap_or_default();
-
-            tracing::info!("Received IGES file, {} bytes", data.len());
-
-            return Json(ImportResponse {
-                success: true,
-                message: "IGES file imported successfully".to_string(),
-                geometry_id: Some(uuid::Uuid::new_v4().to_string()),
-                vertex_count: Some(0),
-                face_count: Some(0),
-            });
-        }
-    }
-
-    Json(ImportResponse {
-        success: false,
-        message: "No file provided".to_string(),
-        geometry_id: None,
-        vertex_count: None,
-        face_count: None,
-    })
+/// IGES import is not supported (no pure-Rust IGES parser; needs OpenCASCADE).
+pub async fn import_iges(mut _multipart: Multipart) -> impl IntoResponse {
+    Json(ImportResponse::error(
+        "IGES import is not supported. Convert to STEP, STL, or OBJ.",
+    ))
 }
 
-/// Generic file upload
+/// Generic upload — dispatches by extension (STEP only for now).
 pub async fn upload_file(mut multipart: Multipart) -> impl IntoResponse {
     while let Some(field) = multipart.next_field().await.unwrap_or(None) {
-        let name = field.name().unwrap_or("").to_string();
-        let filename = field.file_name().map(|s| s.to_string());
-
-        if name == "file" {
-            let data = field.bytes().await.unwrap_or_default();
-
-            // Detect file type from extension or content
-            let format = if let Some(ref fname) = filename {
-                if fname.ends_with(".step") || fname.ends_with(".stp") {
-                    "STEP"
-                } else if fname.ends_with(".iges") || fname.ends_with(".igs") {
-                    "IGES"
-                } else if fname.ends_with(".stl") {
-                    "STL"
-                } else if fname.ends_with(".obj") {
-                    "OBJ"
-                } else {
-                    "Unknown"
-                }
-            } else {
-                "Unknown"
-            };
-
-            tracing::info!(
-                "Received {} file: {:?}, {} bytes",
-                format,
-                filename,
-                data.len()
-            );
-
-            return Json(ImportResponse {
-                success: true,
-                message: format!("{} file uploaded successfully", format),
-                geometry_id: Some(uuid::Uuid::new_v4().to_string()),
-                vertex_count: Some(0),
-                face_count: Some(0),
-            });
+        if field.name() != Some("file") {
+            continue;
         }
-    }
+        let filename = field.file_name().map(|s| s.to_lowercase()).unwrap_or_default();
+        let data = field.bytes().await.unwrap_or_default();
 
-    Json(ImportResponse {
-        success: false,
-        message: "No file provided".to_string(),
-        geometry_id: None,
-        vertex_count: None,
-        face_count: None,
-    })
+        if filename.ends_with(".step") || filename.ends_with(".stp") {
+            return match rcad_io::step::import_from_bytes(&data) {
+                Ok(meshes) => Json(merge_meshes(&meshes)),
+                Err(e) => Json(ImportResponse::error(format!("STEP import failed: {e}"))),
+            };
+        }
+        return Json(ImportResponse::error(format!(
+            "Server import not supported for '{filename}' (use STEP, or import STL/OBJ client-side)"
+        )));
+    }
+    Json(ImportResponse::error("No file provided"))
 }
