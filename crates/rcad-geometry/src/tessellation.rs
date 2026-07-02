@@ -64,10 +64,22 @@ pub fn tessellate(solid: &Solid, config: &TessellationConfig) -> Result<Mesh> {
     let meshed_shape = solid.inner.triangulation(tolerance);
     let mut polymesh = meshed_shape.to_polygon();
 
+    // Sanitize non-finite normals before optimizing. Singular points such as a
+    // cone's apex tessellate to NaN normals, and `put_together_same_attrs` hashes
+    // normals (casting to integers) and panics on NaN. Replace them with the +Z
+    // axis; polymesh_to_mesh recomputes normals if any remain degenerate.
+    for n in polymesh.normals_mut() {
+        if !n.x.is_finite() || !n.y.is_finite() || !n.z.is_finite() {
+            n.x = 0.0;
+            n.y = 0.0;
+            n.z = 1.0;
+        }
+    }
+
     // Optimize the mesh for closed surfaces
     polymesh.put_together_same_attrs(crate::TOLERANCE);
 
-    convert_polymesh_to_mesh(&polymesh)
+    polymesh_to_mesh(&polymesh)
 }
 
 /// Tessellate with default settings
@@ -75,8 +87,9 @@ pub fn tessellate_default(solid: &Solid) -> Result<Mesh> {
     tessellate(solid, &TessellationConfig::default())
 }
 
-/// Convert truck PolygonMesh to our Mesh format
-fn convert_polymesh_to_mesh(polymesh: &PolygonMesh) -> Result<Mesh> {
+/// Convert a truck `PolygonMesh` to our `Mesh` format (public so other crates,
+/// e.g. STEP import in rcad-io, can reuse it).
+pub fn polymesh_to_mesh(polymesh: &PolygonMesh) -> Result<Mesh> {
     let positions_raw = polymesh.positions();
     let normals_vec = polymesh.normals();
     let faces = polymesh.tri_faces();

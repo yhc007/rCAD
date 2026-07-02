@@ -230,6 +230,107 @@ impl CADDocument {
         Ok(format!("{:?}", id.0))
     }
 
+    /// Perform boolean intersection
+    #[wasm_bindgen]
+    pub fn boolean_intersect(&mut self, target_id: &str, tool_id: &str) -> Result<String, JsValue> {
+        let target_uuid = parse_uuid(target_id)?;
+        let tool_uuid = parse_uuid(tool_id)?;
+
+        let solids = self.solids.read();
+
+        let target = solids
+            .iter()
+            .find(|(id, _)| id.0 == target_uuid)
+            .map(|(_, s)| s)
+            .ok_or_else(|| JsValue::from_str("Target not found"))?;
+
+        let tool = solids
+            .iter()
+            .find(|(id, _)| id.0 == tool_uuid)
+            .map(|(_, s)| s)
+            .ok_or_else(|| JsValue::from_str("Tool not found"))?;
+
+        let result = rcad_geometry::boolean_intersect(target, tool)
+            .map_err(|e| JsValue::from_str(&format!("{:?}", e)))?;
+
+        drop(solids);
+
+        let target_feature_id = FeatureId(target_uuid);
+        let tool_feature_id = FeatureId(tool_uuid);
+
+        let feature = Feature::new(
+            format!("Intersect_{}", self.inner.read().features.len()),
+            FeatureData::Boolean(rcad_core::feature::BooleanFeature::Intersect {
+                target: target_feature_id,
+                tools: vec![tool_feature_id],
+            }),
+        );
+
+        let id = feature.id;
+        self.inner.write().add_feature(feature);
+        self.solids.write().push((id, result));
+
+        Ok(format!("{:?}", id.0))
+    }
+
+    /// Translate a feature's solid in place and return the re-tessellated mesh.
+    /// Because the underlying B-Rep moves, later boolean ops use the new pose.
+    #[wasm_bindgen]
+    pub fn translate_feature(
+        &mut self,
+        feature_id: &str,
+        dx: f64,
+        dy: f64,
+        dz: f64,
+    ) -> Result<MeshData, JsValue> {
+        let uuid = parse_uuid(feature_id)?;
+        let mut solids = self.solids.write();
+        let solid = solids
+            .iter_mut()
+            .find(|(id, _)| id.0 == uuid)
+            .map(|(_, s)| s)
+            .ok_or_else(|| JsValue::from_str("Feature not found"))?;
+
+        solid.translate(glam::DVec3::new(dx, dy, dz));
+
+        let mesh = tessellation::tessellate_default(solid)
+            .map_err(|e| JsValue::from_str(&format!("{:?}", e)))?;
+        Ok(MeshData::from_mesh(&mesh))
+    }
+
+    /// Rotate a feature's solid in place (about its bounding-box centre) by
+    /// `angle` radians around the given axis, and return the re-tessellated mesh.
+    #[wasm_bindgen]
+    pub fn rotate_feature(
+        &mut self,
+        feature_id: &str,
+        axis_x: f64,
+        axis_y: f64,
+        axis_z: f64,
+        angle: f64,
+    ) -> Result<MeshData, JsValue> {
+        let uuid = parse_uuid(feature_id)?;
+        let mut solids = self.solids.write();
+        let solid = solids
+            .iter_mut()
+            .find(|(id, _)| id.0 == uuid)
+            .map(|(_, s)| s)
+            .ok_or_else(|| JsValue::from_str("Feature not found"))?;
+
+        // Pivot about the current centre so the part rotates in place.
+        let current = tessellation::tessellate_default(solid)
+            .map_err(|e| JsValue::from_str(&format!("{:?}", e)))?;
+        let center = aabb_center(&current.positions);
+
+        solid.translate(-center);
+        solid.rotate(glam::DVec3::new(axis_x, axis_y, axis_z), angle);
+        solid.translate(center);
+
+        let mesh = tessellation::tessellate_default(solid)
+            .map_err(|e| JsValue::from_str(&format!("{:?}", e)))?;
+        Ok(MeshData::from_mesh(&mesh))
+    }
+
     /// Tessellate a feature to mesh data
     #[wasm_bindgen]
     pub fn tessellate(&self, feature_id: &str) -> Result<MeshData, JsValue> {
@@ -396,6 +497,23 @@ impl MeshData {
             indices: mesh.indices.clone(),
         }
     }
+}
+
+/// Bounding-box centre of a flat xyz position buffer.
+fn aabb_center(positions: &[f32]) -> glam::DVec3 {
+    let mut min = [f32::INFINITY; 3];
+    let mut max = [f32::NEG_INFINITY; 3];
+    for p in positions.chunks_exact(3) {
+        for i in 0..3 {
+            min[i] = min[i].min(p[i]);
+            max[i] = max[i].max(p[i]);
+        }
+    }
+    glam::DVec3::new(
+        ((min[0] + max[0]) * 0.5) as f64,
+        ((min[1] + max[1]) * 0.5) as f64,
+        ((min[2] + max[2]) * 0.5) as f64,
+    )
 }
 
 /// Parse UUID from string
