@@ -37,7 +37,7 @@ async fn read_file_field(multipart: &mut Multipart) -> Option<Vec<u8>> {
 }
 
 /// Merge a list of meshes into one (concatenate, offsetting indices).
-fn merge_meshes(meshes: &[rcad_geometry::Mesh]) -> ImportResponse {
+pub(crate) fn merge_meshes(meshes: &[rcad_geometry::Mesh]) -> ImportResponse {
     let mut positions = Vec::new();
     let mut normals = Vec::new();
     let mut indices = Vec::new();

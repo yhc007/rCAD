@@ -69,6 +69,10 @@ pub fn create_router() -> Router {
 /// API routes
 fn api_routes() -> Router {
     Router::new()
+        // AI copilot (proxies the GLM chat API; key stays server-side)
+        .route("/ai/chat", post(api::ai::chat))
+        // Tripo text-to-3D generation → merged mesh
+        .route("/tripo/generate", post(api::tripo::generate))
         // Import endpoints
         .route("/import/step", post(api::import::import_step))
         .route("/import/iges", post(api::import::import_iges))
