@@ -32,3 +32,8 @@ pkg/
 
 # Logs
 *.log
+
+# Python (services/rcad-newton)
+__pycache__/
+*.pyc
+.venv/
