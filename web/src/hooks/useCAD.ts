@@ -442,7 +442,7 @@ const BOOL_LABEL: Record<string, string> = {
   intersect: 'Intersect',
 };
 
-const cad = {
+export const cad = {
   // Creation
   addPrimitive: async (prim: string, params: number[]) => {
     const id = crypto.randomUUID();

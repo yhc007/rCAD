@@ -1,14 +1,17 @@
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
+import { Sparkles } from 'lucide-react';
 import { Toolbar } from './components/Toolbar';
 import { PropertyPanel } from './components/PropertyPanel';
 import { ModelTree } from './components/ModelTree';
 import { Canvas } from './components/Canvas';
 import { CommandPalette } from './components/CommandPalette';
 import { Toast } from './components/Toast';
+import { AiPanel } from './components/AiPanel';
 import { useCAD } from './hooks/useCAD';
 
 function App() {
   const { initialize, isInitialized, error } = useCAD();
+  const [aiOpen, setAiOpen] = useState(false);
 
   useEffect(() => {
     initialize().then(() => {
@@ -59,7 +62,21 @@ function App() {
         <div className="w-72 border-l border-cad-border bg-cad-panel">
           <PropertyPanel />
         </div>
+
+        {/* AI Copilot drawer (overlays the right side) */}
+        <AiPanel open={aiOpen} onClose={() => setAiOpen(false)} />
       </div>
+
+      {/* Floating launcher for the AI copilot */}
+      {!aiOpen && (
+        <button
+          onClick={() => setAiOpen(true)}
+          title="AI Copilot"
+          className="absolute bottom-6 right-6 z-40 flex items-center gap-2 px-4 py-2 rounded-full bg-cad-accent text-white shadow-xl hover:brightness-110"
+        >
+          <Sparkles size={16} /> Ask AI
+        </button>
+      )}
 
       {/* Command Palette (modal) */}
       <CommandPalette />
