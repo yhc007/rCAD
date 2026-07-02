@@ -1,7 +1,21 @@
 import React from 'react';
 import { useDocumentStore } from '../stores/documentStore';
+import { useCAD } from '../hooks/useCAD';
 import * as Slider from '@radix-ui/react-slider';
 import * as Tabs from '@radix-ui/react-tabs';
+
+// Material colour helpers — features store linear RGB in 0..1; the <input
+// type=color> works in #rrggbb.
+const clamp01 = (v: number) => Math.max(0, Math.min(1, v));
+function rgbToHex(c: [number, number, number]): string {
+  const h = (v: number) => Math.round(clamp01(v) * 255).toString(16).padStart(2, '0');
+  return `#${h(c[0])}${h(c[1])}${h(c[2])}`;
+}
+function hexToRgb(hex: string): [number, number, number] {
+  const m = /^#?([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(hex.trim());
+  if (!m) return [0.6, 0.6, 0.7];
+  return [parseInt(m[1], 16) / 255, parseInt(m[2], 16) / 255, parseInt(m[3], 16) / 255];
+}
 
 export function PropertyPanel() {
   const { selectedFeature, features } = useDocumentStore();
@@ -40,7 +54,7 @@ export function PropertyPanel() {
 
         <Tabs.Content value="material" className="flex-1 overflow-auto p-4">
           {feature ? (
-            <MaterialProperties />
+            <MaterialProperties feature={feature} />
           ) : (
             <div className="text-cad-text-muted text-sm">
               Select a feature to edit material
@@ -56,9 +70,62 @@ interface Feature {
   id: string;
   name: string;
   type: string;
+  position?: [number, number, number];
+  rotation?: [number, number, number];
+  params?: number[];
+  color?: [number, number, number];
+  fixed?: boolean;
+  mass?: number;
 }
 
 function FeatureProperties({ feature }: { feature: Feature }) {
+  const { cad } = useCAD();
+  const pos: [number, number, number] = feature.position ?? [0, 0, 0];
+
+  const fail = (e: unknown, what: string) =>
+    useDocumentStore.getState().setNotice(e instanceof Error ? e.message : `${what} failed`);
+
+  // Moving a feature actually translates its geometry (WASM solid for
+  // primitives/booleans, mesh offset for imports) so booleans/physics follow.
+  const commitPosition = async (axis: number, value: number) => {
+    const d: [number, number, number] = [0, 0, 0];
+    d[axis] = value - pos[axis];
+    if (!d[0] && !d[1] && !d[2]) return;
+    try {
+      await cad.moveFeature(feature.id, d[0], d[1], d[2]);
+    } catch (e) {
+      fail(e, 'Move');
+    }
+  };
+
+  // Rotation is per-axis input in degrees; each commit applies the delta about
+  // that world axis, rotating the part in place (about its centre).
+  const rot: [number, number, number] = feature.rotation ?? [0, 0, 0];
+  const commitRotation = async (axis: number, valueDeg: number) => {
+    const deltaDeg = valueDeg - rot[axis];
+    if (deltaDeg === 0) return;
+    try {
+      await cad.spinFeature(feature.id, axis, (deltaDeg * Math.PI) / 180);
+    } catch (e) {
+      fail(e, 'Rotate');
+    }
+  };
+
+  // Editing a primitive dimension rebuilds the solid at the new size, preserving
+  // its current placement. `prim` maps the display type back to the kernel kind.
+  const prim = feature.type.toLowerCase();
+  const dims = feature.params ?? [];
+  const commitDimension = async (index: number, value: number) => {
+    if (dims[index] === value || !(value >= 0)) return;
+    const params = dims.slice();
+    params[index] = value;
+    try {
+      await cad.resizeFeature(feature.id, prim, params);
+    } catch (e) {
+      fail(e, 'Resize');
+    }
+  };
+
   return (
     <div className="space-y-4">
       <PropertySection title="General">
@@ -67,74 +134,150 @@ function FeatureProperties({ feature }: { feature: Feature }) {
         <PropertyReadOnly label="ID" value={feature.id.substring(0, 8)} />
       </PropertySection>
 
-      {feature.type === 'Box' && (
+      <PropertySection title="Physics">
+        <label className="flex items-center justify-between text-sm text-cad-text">
+          <span>Fixed (static anchor)</span>
+          <input
+            type="checkbox"
+            checked={!!feature.fixed}
+            onChange={(e) => cad.setFeatureProps(feature.id, { fixed: e.target.checked })}
+          />
+        </label>
+        <label className="flex items-center justify-between text-sm text-cad-text">
+          <span>Mass (0 = auto)</span>
+          <input
+            type="number"
+            min={0}
+            step={0.1}
+            value={feature.mass ?? 0}
+            disabled={!!feature.fixed}
+            onChange={(e) =>
+              cad.setFeatureProps(feature.id, { mass: Math.max(0, Number(e.target.value) || 0) })
+            }
+            className="w-24 px-2 py-1 bg-cad-bg border border-cad-border rounded text-sm text-cad-text disabled:opacity-50"
+          />
+        </label>
+      </PropertySection>
+
+      {feature.type === 'Box' && dims.length === 3 && (
         <PropertySection title="Dimensions">
-          <PropertySlider label="Width" value={50} min={1} max={200} />
-          <PropertySlider label="Height" value={50} min={1} max={200} />
-          <PropertySlider label="Depth" value={50} min={1} max={200} />
+          <PropertySlider key={`${feature.id}-w-${dims[0]}`} label="Width" value={dims[0]} min={1} max={200} onCommit={(v) => commitDimension(0, v)} />
+          <PropertySlider key={`${feature.id}-h-${dims[1]}`} label="Height" value={dims[1]} min={1} max={200} onCommit={(v) => commitDimension(1, v)} />
+          <PropertySlider key={`${feature.id}-d-${dims[2]}`} label="Depth" value={dims[2]} min={1} max={200} onCommit={(v) => commitDimension(2, v)} />
         </PropertySection>
       )}
 
-      {feature.type === 'Cylinder' && (
+      {feature.type === 'Cylinder' && dims.length === 2 && (
         <PropertySection title="Dimensions">
-          <PropertySlider label="Radius" value={25} min={1} max={100} />
-          <PropertySlider label="Height" value={50} min={1} max={200} />
+          <PropertySlider key={`${feature.id}-r-${dims[0]}`} label="Radius" value={dims[0]} min={1} max={100} onCommit={(v) => commitDimension(0, v)} />
+          <PropertySlider key={`${feature.id}-h-${dims[1]}`} label="Height" value={dims[1]} min={1} max={200} onCommit={(v) => commitDimension(1, v)} />
         </PropertySection>
       )}
 
-      {feature.type === 'Sphere' && (
+      {feature.type === 'Sphere' && dims.length === 1 && (
         <PropertySection title="Dimensions">
-          <PropertySlider label="Radius" value={25} min={1} max={100} />
+          <PropertySlider key={`${feature.id}-r-${dims[0]}`} label="Radius" value={dims[0]} min={1} max={100} onCommit={(v) => commitDimension(0, v)} />
         </PropertySection>
       )}
 
-      {feature.type === 'Cone' && (
+      {feature.type === 'Cone' && dims.length === 3 && (
         <PropertySection title="Dimensions">
-          <PropertySlider label="Bottom Radius" value={25} min={0} max={100} />
-          <PropertySlider label="Top Radius" value={0} min={0} max={100} />
-          <PropertySlider label="Height" value={50} min={1} max={200} />
+          <PropertySlider key={`${feature.id}-br-${dims[0]}`} label="Bottom Radius" value={dims[0]} min={0} max={100} onCommit={(v) => commitDimension(0, v)} />
+          <PropertySlider key={`${feature.id}-tr-${dims[1]}`} label="Top Radius" value={dims[1]} min={0} max={100} onCommit={(v) => commitDimension(1, v)} />
+          <PropertySlider key={`${feature.id}-ht-${dims[2]}`} label="Height" value={dims[2]} min={1} max={200} onCommit={(v) => commitDimension(2, v)} />
         </PropertySection>
       )}
 
       <PropertySection title="Transform">
-        <PropertyVector3 label="Position" x={0} y={0} z={0} />
-        <PropertyVector3 label="Rotation" x={0} y={0} z={0} />
+        <AxisEditor label="Position (Enter / blur)" value={pos} onCommit={commitPosition} step={5} />
+        <AxisEditor label="Rotation° (Enter / blur)" value={rot} onCommit={commitRotation} step={15} />
       </PropertySection>
     </div>
   );
 }
 
-function MaterialProperties() {
+function AxisEditor({
+  label,
+  value,
+  onCommit,
+  step,
+}: {
+  label: string;
+  value: number[];
+  onCommit: (axis: number, v: number) => void;
+  step: number;
+}) {
+  return (
+    <div>
+      <label className="text-xs text-cad-text-muted">{label}</label>
+      <div className="grid grid-cols-3 gap-1 mt-1">
+        {['X', 'Y', 'Z'].map((ax, i) => (
+          <input
+            // Remount when the committed value changes so defaultValue updates.
+            key={`${label}-${ax}-${value[i]}`}
+            type="number"
+            step={step}
+            defaultValue={value[i]}
+            title={`${label}-${ax}`}
+            onBlur={(e) => onCommit(i, Number(e.target.value) || 0)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') (e.currentTarget as HTMLInputElement).blur();
+            }}
+            className="w-full px-2 py-1 bg-cad-bg border border-cad-border rounded text-sm text-cad-text"
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function MaterialProperties({ feature }: { feature: Feature }) {
+  const { cad } = useCAD();
+  const color = feature.color ?? [0.6, 0.6, 0.7];
+  const hex = rgbToHex(color);
+  const setColor = (rgb: [number, number, number]) =>
+    cad.setFeatureProps(feature.id, { color: rgb });
+
   return (
     <div className="space-y-4">
       <PropertySection title="Base Color">
         <div className="flex gap-2 items-center">
-          <div
-            className="w-8 h-8 rounded border border-cad-border"
-            style={{ backgroundColor: '#cccccc' }}
+          <input
+            type="color"
+            value={hex}
+            onChange={(e) => setColor(hexToRgb(e.target.value))}
+            title="Base color"
+            className="w-8 h-8 rounded border border-cad-border bg-transparent cursor-pointer"
           />
           <input
             type="text"
-            value="#CCCCCC"
-            className="flex-1 px-2 py-1 bg-cad-bg border border-cad-border rounded text-sm"
+            value={hex}
+            onChange={(e) => setColor(hexToRgb(e.target.value))}
+            className="flex-1 px-2 py-1 bg-cad-bg border border-cad-border rounded text-sm uppercase"
           />
         </div>
-      </PropertySection>
-
-      <PropertySection title="PBR Properties">
-        <PropertySlider label="Metallic" value={0} min={0} max={1} step={0.01} />
-        <PropertySlider label="Roughness" value={0.5} min={0} max={1} step={0.01} />
-        <PropertySlider label="Emissive" value={0} min={0} max={1} step={0.01} />
       </PropertySection>
 
       <PropertySection title="Presets">
         <div className="grid grid-cols-4 gap-2">
-          <MaterialPreset name="Plastic" color="#888888" />
-          <MaterialPreset name="Metal" color="#a0a0a0" />
-          <MaterialPreset name="Gold" color="#ffd700" />
-          <MaterialPreset name="Glass" color="#ffffff" />
+          {[
+            ['Steel', '#8c9ab8'],
+            ['Copper', '#d1873f'],
+            ['Brass', '#bfae66'],
+            ['Slate', '#6b7280'],
+            ['Blue', '#5b9bd5'],
+            ['Green', '#7fbf6b'],
+            ['Rose', '#cc7484'],
+            ['Teal', '#5fb3ab'],
+          ].map(([name, c]) => (
+            <MaterialPreset key={name} name={name} color={c} onClick={() => setColor(hexToRgb(c))} />
+          ))}
         </div>
       </PropertySection>
+
+      <p className="text-xs text-cad-text-muted">
+        Color is per-part and saved with the document; Undo reverts it.
+      </p>
     </div>
   );
 }
@@ -194,6 +337,7 @@ function PropertySlider({
   max,
   step = 1,
   onChange,
+  onCommit,
 }: {
   label: string;
   value: number;
@@ -201,7 +345,12 @@ function PropertySlider({
   max: number;
   step?: number;
   onChange?: (value: number) => void;
+  // Fired once when the user releases the slider or blurs the input — a
+  // dimension edit rebuilds the solid, so we don't want one per drag tick.
+  onCommit?: (value: number) => void;
 }) {
+  // Remount when the committed value changes (e.g. via undo/resize) so the
+  // local drag state re-seeds from the new value.
   const [localValue, setLocalValue] = React.useState(value);
 
   return (
@@ -217,6 +366,7 @@ function PropertySlider({
           setLocalValue(v);
           onChange?.(v);
         }}
+        onValueCommit={([v]) => onCommit?.(v)}
       >
         <Slider.Track className="relative h-1 flex-1 bg-cad-bg rounded">
           <Slider.Range className="absolute h-full bg-cad-accent rounded" />
@@ -231,55 +381,30 @@ function PropertySlider({
           setLocalValue(v);
           onChange?.(v);
         }}
+        onBlur={(e) => onCommit?.(parseFloat(e.target.value))}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') (e.currentTarget as HTMLInputElement).blur();
+        }}
         className="w-16 px-2 py-1 bg-cad-bg border border-cad-border rounded text-sm text-right"
       />
     </div>
   );
 }
 
-function PropertyVector3({
-  label,
-  x,
-  y,
-  z,
+function MaterialPreset({
+  name,
+  color,
+  onClick,
 }: {
-  label: string;
-  x: number;
-  y: number;
-  z: number;
+  name: string;
+  color: string;
+  onClick?: () => void;
 }) {
-  return (
-    <div className="flex items-center gap-2">
-      <label className="w-20 text-sm text-cad-text-muted">{label}</label>
-      <div className="flex gap-1 flex-1">
-        <input
-          type="number"
-          value={x}
-          className="w-full px-2 py-1 bg-cad-bg border border-cad-border rounded text-sm"
-          placeholder="X"
-        />
-        <input
-          type="number"
-          value={y}
-          className="w-full px-2 py-1 bg-cad-bg border border-cad-border rounded text-sm"
-          placeholder="Y"
-        />
-        <input
-          type="number"
-          value={z}
-          className="w-full px-2 py-1 bg-cad-bg border border-cad-border rounded text-sm"
-          placeholder="Z"
-        />
-      </div>
-    </div>
-  );
-}
-
-function MaterialPreset({ name, color }: { name: string; color: string }) {
   return (
     <button
       className="flex flex-col items-center p-2 rounded hover:bg-cad-bg"
       title={name}
+      onClick={onClick}
     >
       <div
         className="w-8 h-8 rounded-full border border-cad-border"

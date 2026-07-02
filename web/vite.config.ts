@@ -9,12 +9,24 @@ export default defineConfig({
     wasm(),
     topLevelAwait(),
   ],
+  // The CAD worker imports the WASM glue, so the worker bundle needs the same
+  // wasm / top-level-await transforms as the main bundle.
+  worker: {
+    format: 'es',
+    plugins: () => [wasm(), topLevelAwait()],
+  },
   server: {
     port: 3001,
     proxy: {
       '/api': {
         target: 'http://localhost:3000',
         changeOrigin: true,
+      },
+      // Newton physics microservice (services/rcad-newton); strip the prefix
+      '/physics': {
+        target: 'http://localhost:8000',
+        changeOrigin: true,
+        rewrite: (p) => p.replace(/^\/physics/, ''),
       },
     },
   },

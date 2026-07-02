@@ -7,6 +7,7 @@ import {
   Donut,
   Plus,
   Minus,
+  Layers,
   ChevronRight,
   ChevronDown,
   Eye,
@@ -16,7 +17,8 @@ import { useDocumentStore } from '../stores/documentStore';
 import * as ScrollArea from '@radix-ui/react-scroll-area';
 
 export function ModelTree() {
-  const { features, selectedFeature, selectFeature } = useDocumentStore();
+  const { features, selectedFeatures, selectFeature, toggleSelectFeature } =
+    useDocumentStore();
 
   return (
     <div className="h-full flex flex-col">
@@ -38,16 +40,28 @@ export function ModelTree() {
               expanded
             >
               {/* Features */}
-              {features.map((feature) => (
-                <TreeNode
-                  key={feature.id}
-                  icon={getFeatureIcon(feature.type)}
-                  label={feature.name}
-                  level={1}
-                  selected={selectedFeature === feature.id}
-                  onClick={() => selectFeature(feature.id)}
-                />
-              ))}
+              {features.map((feature) => {
+                const order = selectedFeatures.indexOf(feature.id);
+                return (
+                  <TreeNode
+                    key={feature.id}
+                    icon={getFeatureIcon(feature.type)}
+                    label={feature.name}
+                    level={1}
+                    selected={order >= 0}
+                    badge={
+                      selectedFeatures.length > 1 && order >= 0
+                        ? order + 1
+                        : undefined
+                    }
+                    onClick={(e) =>
+                      e.metaKey || e.ctrlKey
+                        ? toggleSelectFeature(feature.id)
+                        : selectFeature(feature.id)
+                    }
+                  />
+                );
+              })}
 
               {features.length === 0 && (
                 <div className="px-6 py-2 text-sm text-cad-text-muted">
@@ -75,8 +89,9 @@ interface TreeNodeProps {
   expanded?: boolean;
   selected?: boolean;
   suppressed?: boolean;
+  badge?: number;
   children?: React.ReactNode;
-  onClick?: () => void;
+  onClick?: (e: React.MouseEvent) => void;
 }
 
 function TreeNode({
@@ -86,6 +101,7 @@ function TreeNode({
   expanded: initialExpanded = false,
   selected,
   suppressed,
+  badge,
   children,
   onClick,
 }: TreeNodeProps) {
@@ -123,6 +139,12 @@ function TreeNode({
 
         <span className="text-cad-text-muted">{icon}</span>
         <span className="text-sm flex-1 truncate">{label}</span>
+
+        {badge !== undefined && (
+          <span className="flex items-center justify-center w-4 h-4 text-[10px] font-semibold rounded-full bg-cad-accent text-white">
+            {badge}
+          </span>
+        )}
 
         <button
           className="p-0.5 opacity-0 group-hover:opacity-100 hover:bg-cad-border rounded"
@@ -172,6 +194,8 @@ function getFeatureIcon(type: string) {
       return <Plus {...iconProps} className="text-emerald-400" />;
     case 'Subtract':
       return <Minus {...iconProps} className="text-red-400" />;
+    case 'Intersect':
+      return <Layers {...iconProps} className="text-cyan-400" />;
     default:
       return <Box {...iconProps} />;
   }

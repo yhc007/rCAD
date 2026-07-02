@@ -1,15 +1,14 @@
-import React, { useEffect } from 'react';
+import { useEffect } from 'react';
 import { Toolbar } from './components/Toolbar';
 import { PropertyPanel } from './components/PropertyPanel';
 import { ModelTree } from './components/ModelTree';
 import { Canvas } from './components/Canvas';
 import { CommandPalette } from './components/CommandPalette';
-import { useDocumentStore } from './stores/documentStore';
+import { Toast } from './components/Toast';
 import { useCAD } from './hooks/useCAD';
 
 function App() {
   const { initialize, isInitialized, error } = useCAD();
-  const { setDocument } = useDocumentStore();
 
   useEffect(() => {
     initialize().then(() => {
@@ -64,6 +63,9 @@ function App() {
 
       {/* Command Palette (modal) */}
       <CommandPalette />
+
+      {/* Transient notices (e.g. cancelled boolean) */}
+      <Toast />
     </div>
   );
 }
