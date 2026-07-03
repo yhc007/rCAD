@@ -199,6 +199,16 @@ export const AI_TOOLS: ToolDef[] = [
     },
   },
   {
+    name: 'make_gear',
+    description:
+      'Create a spur gear as a single part (a disc with straight teeth around it), standing along +Y and centred at the origin. `teeth` is the tooth count; `module` (mm) sets tooth size — pitch diameter = module × teeth; `thickness` is the face width. (No centre bore — the kernel can\'t cut holes.)',
+    input_schema: {
+      type: 'object',
+      properties: { teeth: num, module: num, thickness: num },
+      required: ['teeth'],
+    },
+  },
+  {
     name: 'simulate_physics',
     description:
       'Run a Newton rigid-body drop test on the current model and start playback for the user. Parts marked fixed are anchors; the rest fall under gravity. Returns, per part, its start/end height, whether it settled, and how far it moved — use this to answer "does it stand / stay?" and iterate.',
@@ -323,6 +333,25 @@ function placedMesh(
     const [nx, ny, nz] = angle
       ? rotAxis(axisIdx, angle, g.normals[i * 3], g.normals[i * 3 + 1], g.normals[i * 3 + 2])
       : [g.normals[i * 3], g.normals[i * 3 + 1], g.normals[i * 3 + 2]];
+    normals[i * 3] = nx;
+    normals[i * 3 + 1] = ny;
+    normals[i * 3 + 2] = nz;
+  }
+  return { positions, normals, vertexCount: n };
+}
+
+// Copy a mesh translated out to `radius` along +X then swung to `theta` about Y
+// — places gear teeth evenly around the axis.
+function revolvedCopy(g: MeshGeometry, radius: number, theta: number): MeshGeometry {
+  const n = g.vertexCount;
+  const positions = new Float32Array(n * 3);
+  const normals = new Float32Array(n * 3);
+  for (let i = 0; i < n; i++) {
+    const [x, y, z] = rotAxis(1, theta, g.positions[i * 3] + radius, g.positions[i * 3 + 1], g.positions[i * 3 + 2]);
+    positions[i * 3] = x;
+    positions[i * 3 + 1] = y;
+    positions[i * 3 + 2] = z;
+    const [nx, ny, nz] = rotAxis(1, theta, g.normals[i * 3], g.normals[i * 3 + 1], g.normals[i * 3 + 2]);
     normals[i * 3] = nx;
     normals[i * 3 + 1] = ny;
     normals[i * 3 + 2] = nz;
@@ -513,6 +542,33 @@ export async function executeTool(name: string, input: Input): Promise<unknown> 
         if (!parts.length) return { error: 'profile produced no solid sections' };
         const id = await cad.importMesh('Revolve', mergeGeoms(parts));
         return { id, bbox: bboxOf(id) };
+      }
+
+      case 'make_gear': {
+        const N = Math.max(4, Math.min(200, Math.round(Number(input.teeth) || 0)));
+        if (!N) return { error: 'teeth is required' };
+        const m = Math.max(0.2, Number(input.module) || 2);
+        const t = Math.max(1, Number(input.thickness) || m * 3);
+        const rp = (m * N) / 2; // pitch radius
+        const ro = rp + m; // outer (addendum) radius
+        const bodyR = rp - 0.25 * m; // disc radius, just below pitch
+        const overlap = 0.6 * m;
+        const radialLen = ro - (bodyR - overlap); // tooth reaches into the disc
+        const R = ro - radialLen / 2; // tooth centre radius
+        const toothW = ((Math.PI * m) / 2) * 0.9; // ~half the circular pitch
+        // Disc: cylinder (built along Z) stood up along Y.
+        const disc = placedMesh(await cad.buildPrimitiveMesh('cylinder', [bodyR, t]), 0, Math.PI / 2, [0, 0, 0]);
+        // One tooth box, reused around the circle.
+        const tooth = await cad.buildPrimitiveMesh('box', [radialLen, t, toothW]);
+        const parts: MeshGeometry[] = [disc];
+        for (let i = 0; i < N; i++) parts.push(revolvedCopy(tooth, R, (i * 2 * Math.PI) / N));
+        const id = await cad.importMesh(`Gear ${N}T`, mergeGeoms(parts), [0.6, 0.62, 0.66]);
+        return {
+          id,
+          bbox: bboxOf(id),
+          pitch_diameter: Math.round(2 * rp * 100) / 100,
+          outer_diameter: Math.round(2 * ro * 100) / 100,
+        };
       }
 
       case 'simulate_physics': {

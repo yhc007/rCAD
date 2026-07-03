@@ -24,7 +24,7 @@ How to work:
 - Refer to parts by their id. Select the part you are actively changing so the user can see it.
 - After each change, trust the tool result (it returns the new bounding box) to verify the size/placement.
 - For an organic / freeform shape that is not a simple primitive (a gear, a bracket, a toy, a figurine), use generate_mesh with a short text prompt to synthesise it, then place it.
-- For a bolt use make_bolt. For any turned/lathed shape (vase, bottle, cup, knob, pillar, wheel, nozzle) use make_revolve with a {y,radius} profile — it builds a single clean solid of revolution, far better than stacking primitives.
+- For a bolt use make_bolt; for a gear use make_gear (teeth + module). For any turned/lathed shape (vase, bottle, cup, knob, pillar, wheel, nozzle) use make_revolve with a {y,radius} profile — it builds a single clean solid of revolution, far better than stacking primitives.
 
 Important limitations:
 - boolean_op (union/subtract/intersect) uses a weak kernel and OFTEN produces wrong or empty geometry. Prefer building ASSEMBLIES by positioning separate parts over using subtract. If you must use a boolean, check the returned bounding box and undo + try another approach if it looks wrong.
