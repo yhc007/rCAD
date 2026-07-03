@@ -462,6 +462,15 @@ export const cad = {
     return id;
   },
 
+  // Tessellate a throwaway primitive without adding a feature or a command —
+  // used by composite macros (bolt/revolve) that merge several primitive meshes
+  // into a single imported part.
+  buildPrimitiveMesh: async (prim: string, params: number[]): Promise<MeshGeometry> => {
+    const id = crypto.randomUUID();
+    await call('create', { id, kind: prim, params }, CREATE_TIMEOUT);
+    return getMesh(id);
+  },
+
   // Editing
   moveFeature: (id: string, dx: number, dy: number, dz: number) =>
     dispatch({ kind: 'translate', id, d: [dx, dy, dz] }),

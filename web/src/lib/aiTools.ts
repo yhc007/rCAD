@@ -9,6 +9,7 @@ import { cad } from '../hooks/useCAD';
 import { useDocumentStore, type Feature } from '../stores/documentStore';
 import type { MeshGeometry } from './meshParsers';
 import { runSimulation } from './physics';
+import { rotAxis } from './meshTransforms';
 
 // --- Anthropic tool definitions ---------------------------------------------
 
@@ -168,6 +169,36 @@ export const AI_TOOLS: ToolDef[] = [
     },
   },
   {
+    name: 'make_bolt',
+    description:
+      'Create a bolt as a single part: a cylindrical shaft with a wider cylindrical head, standing along +Y with the shaft bottom at the origin. All dimensions in mm; head defaults ~1.8× diameter wide and ~0.8× tall.',
+    input_schema: {
+      type: 'object',
+      properties: { diameter: num, length: num, head_diameter: num, head_height: num },
+      required: ['diameter', 'length'],
+    },
+  },
+  {
+    name: 'make_revolve',
+    description:
+      'Create a solid of revolution (lathe) as a single part from a profile: a list of {y, radius} points in mm, increasing in y. Each consecutive pair becomes a frustum revolved around the vertical (Y) axis. Use for vases, bottles, pillars, knobs, wheels, nozzles, cups. A radius of 0 makes a pointed end.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        profile: {
+          type: 'array',
+          description: 'ordered [{y, radius}, …], at least 2 points',
+          items: {
+            type: 'object',
+            properties: { y: num, radius: num },
+            required: ['y', 'radius'],
+          },
+        },
+      },
+      required: ['profile'],
+    },
+  },
+  {
     name: 'simulate_physics',
     description:
       'Run a Newton rigid-body drop test on the current model and start playback for the user. Parts marked fixed are anchors; the rest fall under gravity. Returns, per part, its start/end height, whether it settled, and how far it moved — use this to answer "does it stand / stay?" and iterate.',
@@ -269,6 +300,48 @@ function deindexServer(d: { positions: number[]; normals: number[]; indices: num
     normals[i * 3 + 2] = d.normals[v * 3 + 2];
   }
   return { positions, normals, vertexCount: n };
+}
+
+// Rotate a mesh about a world axis (through the origin) then translate — used to
+// orient/position the primitive pieces of a composite macro before merging.
+function placedMesh(
+  g: MeshGeometry,
+  axisIdx: number,
+  angle: number,
+  t: [number, number, number]
+): MeshGeometry {
+  const n = g.vertexCount;
+  const positions = new Float32Array(n * 3);
+  const normals = new Float32Array(n * 3);
+  for (let i = 0; i < n; i++) {
+    const [px, py, pz] = angle
+      ? rotAxis(axisIdx, angle, g.positions[i * 3], g.positions[i * 3 + 1], g.positions[i * 3 + 2])
+      : [g.positions[i * 3], g.positions[i * 3 + 1], g.positions[i * 3 + 2]];
+    positions[i * 3] = px + t[0];
+    positions[i * 3 + 1] = py + t[1];
+    positions[i * 3 + 2] = pz + t[2];
+    const [nx, ny, nz] = angle
+      ? rotAxis(axisIdx, angle, g.normals[i * 3], g.normals[i * 3 + 1], g.normals[i * 3 + 2])
+      : [g.normals[i * 3], g.normals[i * 3 + 1], g.normals[i * 3 + 2]];
+    normals[i * 3] = nx;
+    normals[i * 3 + 1] = ny;
+    normals[i * 3 + 2] = nz;
+  }
+  return { positions, normals, vertexCount: n };
+}
+
+// Concatenate de-indexed meshes into one (no index remap — each is flat).
+function mergeGeoms(list: MeshGeometry[]): MeshGeometry {
+  const total = list.reduce((s, g) => s + g.vertexCount, 0);
+  const positions = new Float32Array(total * 3);
+  const normals = new Float32Array(total * 3);
+  let o = 0;
+  for (const g of list) {
+    positions.set(g.positions, o);
+    normals.set(g.normals, o);
+    o += g.vertexCount * 3;
+  }
+  return { positions, normals, vertexCount: total };
 }
 
 type Input = Record<string, unknown>;
@@ -402,6 +475,44 @@ export async function executeTool(name: string, input: Input): Promise<unknown> 
         const dy = b.max[1] + gap - a.min[1];
         await cad.moveFeature(String(input.id), dx, dy, dz);
         return { id: input.id, placedOn: input.base_id };
+      }
+
+      case 'make_bolt': {
+        const d = Number(input.diameter) || 0;
+        const L = Number(input.length) || 0;
+        if (d <= 0 || L <= 0) return { error: 'diameter and length must be > 0' };
+        const hd = Number(input.head_diameter) || d * 1.8;
+        const hh = Number(input.head_height) || d * 0.8;
+        const shaft0 = await cad.buildPrimitiveMesh('cylinder', [d / 2, L]);
+        const head0 = await cad.buildPrimitiveMesh('cylinder', [hd / 2, hh]);
+        // Cylinders build along Z; rotate +90° about X to stand along Y.
+        const shaft = placedMesh(shaft0, 0, Math.PI / 2, [0, L / 2, 0]); // bottom at 0
+        const head = placedMesh(head0, 0, Math.PI / 2, [0, L + hh / 2, 0]); // on top
+        const id = await cad.importMesh(`Bolt M${d}`, mergeGeoms([shaft, head]), [0.62, 0.63, 0.66]);
+        return { id, bbox: bboxOf(id) };
+      }
+
+      case 'make_revolve': {
+        const raw = Array.isArray(input.profile) ? (input.profile as Array<{ y: unknown; radius: unknown }>) : [];
+        const pts = raw
+          .map((p) => ({ y: Number(p.y), radius: Math.max(0, Number(p.radius)) }))
+          .filter((p) => Number.isFinite(p.y) && Number.isFinite(p.radius));
+        if (pts.length < 2) return { error: 'profile needs at least 2 {y,radius} points' };
+        pts.sort((a, b) => a.y - b.y);
+        const parts: MeshGeometry[] = [];
+        for (let i = 0; i < pts.length - 1; i++) {
+          const a = pts[i];
+          const b = pts[i + 1];
+          const h = b.y - a.y;
+          if (h <= 1e-6 || (a.radius <= 1e-6 && b.radius <= 1e-6)) continue;
+          const frustum = await cad.buildPrimitiveMesh('cone', [a.radius, b.radius, h]);
+          // Cone builds along Z (bottomR at -h/2); rotate -90° about X so the
+          // bottom radius ends up lower, then place its base at a.y.
+          parts.push(placedMesh(frustum, 0, -Math.PI / 2, [0, a.y + h / 2, 0]));
+        }
+        if (!parts.length) return { error: 'profile produced no solid sections' };
+        const id = await cad.importMesh('Revolve', mergeGeoms(parts));
+        return { id, bbox: bboxOf(id) };
       }
 
       case 'simulate_physics': {
