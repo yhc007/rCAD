@@ -1,7 +1,17 @@
 import React from 'react';
 import { Sparkles, X, Send, Check, Ban } from 'lucide-react';
 import { useDocumentStore } from '../stores/documentStore';
-import { runTurn, type Msg, type ToolCall } from '../lib/aiAgent';
+import { runTurn, type Msg, type ToolCall, type Usage } from '../lib/aiAgent';
+
+// GLM-4-plus pricing estimate (¥ per 1M tokens); cached input is discounted.
+const PRICE = { input: 50, output: 50, cached: 10 };
+const fmtN = (n: number) => n.toLocaleString();
+function estCost(u: { prompt: number; completion: number; cached: number }): string {
+  const yuan =
+    ((u.prompt - u.cached) * PRICE.input + u.cached * PRICE.cached + u.completion * PRICE.output) /
+    1e6;
+  return `~¥${yuan.toFixed(3)}`;
+}
 
 type Item =
   | { kind: 'user'; text: string }
@@ -20,6 +30,7 @@ export function AiPanel({ open, onClose }: { open: boolean; onClose: () => void 
   const [input, setInput] = React.useState('');
   const [busy, setBusy] = React.useState(false);
   const [pending, setPending] = React.useState<{ call: ToolCall; resolve: (ok: boolean) => void } | null>(null);
+  const [usage, setUsage] = React.useState({ prompt: 0, completion: 0, cached: 0 });
   const historyRef = React.useRef<Msg[]>([]);
   const streamIdRef = React.useRef<string | null>(null); // active streaming assistant bubble
   const scrollRef = React.useRef<HTMLDivElement>(null);
@@ -64,6 +75,12 @@ export function AiPanel({ open, onClose }: { open: boolean; onClose: () => void 
           streamIdRef.current = null;
           setItems((p) => [...p, { kind: 'error', text: m }]);
         },
+        onUsage: (u: Usage) =>
+          setUsage((s) => ({
+            prompt: s.prompt + u.prompt_tokens,
+            completion: s.completion + u.completion_tokens,
+            cached: s.cached + u.cached_tokens,
+          })),
       });
     } finally {
       setBusy(false);
@@ -138,6 +155,21 @@ export function AiPanel({ open, onClose }: { open: boolean; onClose: () => void 
           </div>
         )}
       </div>
+
+      {(usage.prompt > 0 || usage.completion > 0) && (
+        <div className="px-3 py-1 border-t border-cad-border flex items-center gap-3 text-[11px] font-mono text-cad-text-muted">
+          <span title="input tokens">{fmtN(usage.prompt)} in</span>
+          <span title="output tokens">{fmtN(usage.completion)} out</span>
+          {usage.cached > 0 && (
+            <span className="text-green-500" title="cached (prompt-cache) tokens">
+              {fmtN(usage.cached)} cached
+            </span>
+          )}
+          <span className="flex-1 text-right" title="session cost estimate">
+            {estCost(usage)}
+          </span>
+        </div>
+      )}
 
       <div className="p-3 border-t border-cad-border">
         <div className="flex items-end gap-2">

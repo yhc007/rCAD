@@ -64,12 +64,21 @@ export interface AgentCallbacks {
   // Approval-gated tools pause here for user approval.
   requestApproval: (call: ToolCall) => Promise<boolean>;
   onError: (message: string) => void;
+  // Token usage for one model call (for the cost display); cached = prefix cache.
+  onUsage?: (usage: Usage) => void;
+}
+
+export interface Usage {
+  prompt_tokens: number;
+  completion_tokens: number;
+  cached_tokens: number;
 }
 
 interface ModelResult {
   message: Msg | null;
   finish: string;
   error?: string;
+  usage?: Usage;
 }
 
 interface ToolAcc {
@@ -90,6 +99,7 @@ async function callModel(messages: Msg[], onDelta: (t: string) => void): Promise
         model: MODEL,
         max_tokens: 2048,
         stream: true,
+        stream_options: { include_usage: true }, // final chunk reports token usage
         messages: [{ role: 'system', content: SYSTEM_PROMPT }, ...messages],
         tools: OPENAI_TOOLS,
         tool_choice: 'auto',
@@ -117,15 +127,27 @@ async function callModel(messages: Msg[], onDelta: (t: string) => void): Promise
   let buffer = '';
   let content = '';
   let finish = '';
+  let usage: Usage | undefined;
   const tools = new Map<number, ToolAcc>();
 
   const handle = (data: string) => {
     if (data === '[DONE]') return;
-    let obj: { choices?: Array<{ delta?: Record<string, unknown>; finish_reason?: string }> };
+    let obj: {
+      choices?: Array<{ delta?: Record<string, unknown>; finish_reason?: string }>;
+      usage?: { prompt_tokens?: number; completion_tokens?: number; prompt_tokens_details?: { cached_tokens?: number } };
+    };
     try {
       obj = JSON.parse(data);
     } catch {
       return;
+    }
+    // The usage chunk (include_usage) has empty choices, so read it first.
+    if (obj.usage) {
+      usage = {
+        prompt_tokens: obj.usage.prompt_tokens ?? 0,
+        completion_tokens: obj.usage.completion_tokens ?? 0,
+        cached_tokens: obj.usage.prompt_tokens_details?.cached_tokens ?? 0,
+      };
     }
     const choice = obj.choices?.[0];
     if (!choice) return;
@@ -170,24 +192,33 @@ async function callModel(messages: Msg[], onDelta: (t: string) => void): Promise
     content: content || null,
     ...(tool_calls.length ? { tool_calls } : {}),
   };
-  return { message, finish };
+  return { message, finish, usage };
 }
 
 /** Run one user turn to completion, returning the updated conversation history. */
+// Client-side prompt cache: the document snapshot is large and is re-grounded
+// each turn, but the model already has the previous one in the conversation.
+// Only resend it when it actually changed (or the conversation is new) — this
+// cuts prompt tokens (and cost) on multi-turn sessions where GLM exposes no
+// provider-side prompt cache.
+let lastSnapshot: string | null = null;
+
 export async function runTurn(
   history: Msg[],
   userText: string,
   cb: AgentCallbacks
 ): Promise<Msg[]> {
-  // Ground the model in the current document at the start of the turn.
   const snapshot = JSON.stringify(documentSnapshot());
-  const messages: Msg[] = [
-    ...history,
-    { role: 'user', content: `${userText}\n\n[current document]\n${snapshot}` },
-  ];
+  const fresh = history.length === 0 || snapshot !== lastSnapshot;
+  lastSnapshot = snapshot;
+  const content = fresh
+    ? `${userText}\n\n[current document]\n${snapshot}`
+    : `${userText}\n\n[document unchanged since my last message]`;
+  const messages: Msg[] = [...history, { role: 'user', content }];
 
   for (let iter = 0; iter < MAX_ITERS; iter++) {
     const res = await callModel(messages, cb.onAssistantDelta);
+    if (res.usage) cb.onUsage?.(res.usage);
     if (res.error || !res.message) {
       cb.onError(res.error || 'empty model response');
       return messages;
