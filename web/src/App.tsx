@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Sparkles } from 'lucide-react';
+import { Sparkles, Activity } from 'lucide-react';
 import { Toolbar } from './components/Toolbar';
 import { PropertyPanel } from './components/PropertyPanel';
 import { ModelTree } from './components/ModelTree';
@@ -7,11 +7,13 @@ import { Canvas } from './components/Canvas';
 import { CommandPalette } from './components/CommandPalette';
 import { Toast } from './components/Toast';
 import { AiPanel } from './components/AiPanel';
+import { ProcessPanel } from './components/ProcessPanel';
 import { useCAD } from './hooks/useCAD';
 
 function App() {
   const { initialize, isInitialized, error } = useCAD();
   const [aiOpen, setAiOpen] = useState(false);
+  const [twinOpen, setTwinOpen] = useState(false);
 
   useEffect(() => {
     initialize().then(() => {
@@ -67,7 +69,10 @@ function App() {
         <AiPanel open={aiOpen} onClose={() => setAiOpen(false)} />
       </div>
 
-      {/* Floating launcher for the AI copilot */}
+      {/* Process digital-twin telemetry (bottom drawer) */}
+      <ProcessPanel open={twinOpen} onClose={() => setTwinOpen(false)} />
+
+      {/* Floating launchers */}
       {!aiOpen && (
         <button
           onClick={() => setAiOpen(true)}
@@ -75,6 +80,15 @@ function App() {
           className="absolute bottom-6 right-6 z-40 flex items-center gap-2 px-4 py-2 rounded-full bg-cad-accent text-white shadow-xl hover:brightness-110"
         >
           <Sparkles size={16} /> Ask AI
+        </button>
+      )}
+      {!twinOpen && (
+        <button
+          onClick={() => setTwinOpen(true)}
+          title="Process Twin"
+          className="absolute bottom-20 right-6 z-40 flex items-center gap-2 px-4 py-2 rounded-full bg-cad-panel border border-cad-border text-cad-text shadow-xl hover:border-cad-accent"
+        >
+          <Activity size={16} /> Twin
         </button>
       )}
 

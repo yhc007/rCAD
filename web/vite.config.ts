@@ -21,6 +21,7 @@ export default defineConfig({
       '/api': {
         target: 'http://localhost:3000',
         changeOrigin: true,
+        ws: true, // proxy the telemetry WebSocket (/api/telemetry/ws)
       },
       // Newton physics microservice (services/rcad-newton); strip the prefix
       '/physics': {
