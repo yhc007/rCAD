@@ -82,36 +82,80 @@ pub async fn import_step(mut multipart: Multipart) -> impl IntoResponse {
     }
 }
 
-/// Import a glTF/GLB file → tessellated mesh (pure-Rust `gltf`). Handy for
-/// bringing in models converted from formats truck-stepio can't read (e.g. a
+/// One renderable part of a glTF import (all the geometry sharing a material).
+#[derive(Debug, Serialize, Default)]
+pub struct GltfPart {
+    pub name: String,
+    /// Base material colour (texture-averaged) as linear RGB, when meaningful.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub color: Option<[f32; 3]>,
+    pub positions: Vec<f32>,
+    pub normals: Vec<f32>,
+    pub indices: Vec<u32>,
+}
+
+/// glTF import response: one part per material so each keeps its own colour.
+#[derive(Debug, Serialize, Default)]
+pub struct GltfResponse {
+    pub success: bool,
+    pub message: String,
+    pub parts: Vec<GltfPart>,
+}
+
+fn gltf_error(message: impl Into<String>) -> GltfResponse {
+    GltfResponse { success: false, message: message.into(), ..Default::default() }
+}
+
+/// A material colour, unless it's the near-white glTF default (→ palette colour).
+fn part_color(c: [f32; 4]) -> Option<[f32; 3]> {
+    if c[0] > 0.97 && c[1] > 0.97 && c[2] > 0.97 {
+        None
+    } else {
+        Some([c[0], c[1], c[2]])
+    }
+}
+
+/// Import a glTF/GLB file → one mesh part per material, each with its colour.
+/// Handy for models converted from formats truck-stepio can't read (e.g. a
 /// complex STEP exported to GLB by FreeCAD). Original units are preserved.
 pub async fn import_gltf(mut multipart: Multipart) -> impl IntoResponse {
     let Some(data) = read_file_field(&mut multipart).await else {
-        return Json(ImportResponse::error("No file provided"));
+        return Json(gltf_error("No file provided"));
     };
     tracing::info!("Importing glTF file, {} bytes", data.len());
 
     let opts = rcad_io::ImportOptions::new(); // scale = 1.0, keep the model's units
-    match rcad_io::gltf::import(std::io::Cursor::new(&data), &opts) {
-        Ok(model) => {
-            let meshes: Vec<rcad_geometry::Mesh> =
-                model.meshes.into_iter().map(|m| m.mesh).collect();
-            if meshes.is_empty() {
-                return Json(ImportResponse::error("glTF file contained no meshes"));
-            }
-            let resp = merge_meshes(&meshes);
-            tracing::info!(
-                "glTF imported: {} vertices, {} triangles",
-                resp.vertex_count,
-                resp.triangle_count
-            );
-            Json(resp)
-        }
+    let model = match rcad_io::gltf::import(std::io::Cursor::new(&data), &opts) {
+        Ok(m) => m,
         Err(e) => {
             tracing::warn!("glTF import failed: {e}");
-            Json(ImportResponse::error(format!("glTF import failed: {e}")))
+            return Json(gltf_error(format!("glTF import failed: {e}")));
         }
+    };
+    if model.meshes.is_empty() {
+        return Json(gltf_error("glTF file contained no meshes"));
     }
+
+    // Group geometry by material so each colour becomes its own part.
+    let mut groups: std::collections::BTreeMap<Option<usize>, Vec<rcad_geometry::Mesh>> =
+        std::collections::BTreeMap::new();
+    for im in model.meshes {
+        groups.entry(im.material_index).or_default().push(im.mesh);
+    }
+
+    let mut parts = Vec::new();
+    for (mat_idx, meshes) in groups {
+        let m = merge_meshes(&meshes);
+        let mat = mat_idx.and_then(|i| model.materials.get(i));
+        let name = match mat {
+            Some(mat) if !mat.name.is_empty() && mat.name != "Unnamed" => mat.name.clone(),
+            _ => mat_idx.map(|i| format!("Material {i}")).unwrap_or_else(|| "Part".into()),
+        };
+        let color = mat.and_then(|mat| part_color(mat.base_color));
+        parts.push(GltfPart { name, color, positions: m.positions, normals: m.normals, indices: m.indices });
+    }
+    tracing::info!("glTF imported: {} part(s)", parts.len());
+    Json(GltfResponse { success: true, message: "imported".into(), parts })
 }
 
 /// IGES import is not supported (no pure-Rust IGES parser; needs OpenCASCADE).

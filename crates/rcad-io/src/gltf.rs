@@ -200,17 +200,15 @@ fn import_primitive(
         return Err(IoError::ParseError("Missing positions".to_string()));
     }
 
-    // Read normals
+    // Read normals (compute them from the geometry below if the file has none —
+    // zero normals become NaN in the shader and render white).
+    let has_normals = reader.read_normals().is_some();
     if let Some(iter) = reader.read_normals() {
         for normal in iter {
             mesh.normals.push(normal[0]);
             mesh.normals.push(normal[1]);
             mesh.normals.push(normal[2]);
         }
-    } else {
-        // Generate default normals
-        let vertex_count = mesh.vertex_count();
-        mesh.normals = vec![0.0; vertex_count * 3];
     }
 
     // Read UVs
@@ -235,11 +233,57 @@ fn import_primitive(
         }
     }
 
+    if !has_normals {
+        compute_smooth_normals(&mut mesh);
+    }
+
     if options.flip_normals {
         mesh.flip_normals();
     }
 
     Ok(mesh)
+}
+
+/// Fill in per-vertex normals from the triangle geometry (area-weighted sum of
+/// adjacent face normals), for glTF primitives that ship without a NORMAL
+/// attribute. Zero normals would otherwise NaN out the shader (white surface).
+fn compute_smooth_normals(mesh: &mut Mesh) {
+    let vc = mesh.vertex_count();
+    let mut normals = vec![0.0f32; vc * 3];
+    let pos = &mesh.positions;
+    let idx = &mesh.indices;
+    let mut t = 0;
+    while t + 2 < idx.len() {
+        let (a, b, c) = (idx[t] as usize, idx[t + 1] as usize, idx[t + 2] as usize);
+        let p = |i: usize| [pos[i * 3], pos[i * 3 + 1], pos[i * 3 + 2]];
+        let (pa, pb, pc) = (p(a), p(b), p(c));
+        let u = [pb[0] - pa[0], pb[1] - pa[1], pb[2] - pa[2]];
+        let v = [pc[0] - pa[0], pc[1] - pa[1], pc[2] - pa[2]];
+        // Cross product (not normalized → area-weighted).
+        let n = [
+            u[1] * v[2] - u[2] * v[1],
+            u[2] * v[0] - u[0] * v[2],
+            u[0] * v[1] - u[1] * v[0],
+        ];
+        for vi in [a, b, c] {
+            normals[vi * 3] += n[0];
+            normals[vi * 3 + 1] += n[1];
+            normals[vi * 3 + 2] += n[2];
+        }
+        t += 3;
+    }
+    for k in 0..vc {
+        let (x, y, z) = (normals[k * 3], normals[k * 3 + 1], normals[k * 3 + 2]);
+        let len = (x * x + y * y + z * z).sqrt();
+        if len > 1e-9 {
+            normals[k * 3] = x / len;
+            normals[k * 3 + 1] = y / len;
+            normals[k * 3 + 2] = z / len;
+        } else {
+            normals[k * 3 + 1] = 1.0; // degenerate → point up
+        }
+    }
+    mesh.normals = normals;
 }
 
 fn import_node(node: &gltf::Node<'_>, nodes: &mut Vec<ImportedNode>) {

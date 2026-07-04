@@ -192,4 +192,6 @@ export function parseOBJ(text: string): MeshGeometry {
 export interface ImportedMesh {
   name: string;
   geometry: MeshGeometry;
+  // Optional base colour (e.g. a glTF material colour), linear RGB 0..1.
+  color?: [number, number, number];
 }

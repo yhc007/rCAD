@@ -570,13 +570,19 @@ export function Canvas() {
             setNotice(`Opened ${file.name}.`);
             continue;
           }
-          const isStep = /\.(step|stp)$/i.test(file.name);
+          const isServer = /\.(step|stp|gltf|glb)$/i.test(file.name);
           setNotice(
-            `Importing ${file.name} (${mb} MB)${isStep ? ' — STEP parsing can take a while' : ''}…`
+            `Importing ${file.name} (${mb} MB)${isServer ? ' — this can take a while' : ''}…`
           );
-          const { name, geometry } = await importMeshFile(file);
-          await cad.importMesh(name, geometry);
-          setNotice(`Imported ${name} — ${geometry.vertexCount.toLocaleString()} verts.`);
+          const parts = await importMeshFile(file);
+          let verts = 0;
+          for (const p of parts) {
+            await cad.importMesh(p.name, p.geometry, p.color);
+            verts += p.geometry.vertexCount;
+          }
+          setNotice(
+            `Imported ${file.name}${parts.length > 1 ? ` — ${parts.length} parts` : ''} — ${verts.toLocaleString()} verts.`
+          );
         } catch (err) {
           console.error('Import failed:', err);
           setNotice(err instanceof Error ? err.message : 'Import failed');
