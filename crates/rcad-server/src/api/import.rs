@@ -82,6 +82,38 @@ pub async fn import_step(mut multipart: Multipart) -> impl IntoResponse {
     }
 }
 
+/// Import a glTF/GLB file → tessellated mesh (pure-Rust `gltf`). Handy for
+/// bringing in models converted from formats truck-stepio can't read (e.g. a
+/// complex STEP exported to GLB by FreeCAD). Original units are preserved.
+pub async fn import_gltf(mut multipart: Multipart) -> impl IntoResponse {
+    let Some(data) = read_file_field(&mut multipart).await else {
+        return Json(ImportResponse::error("No file provided"));
+    };
+    tracing::info!("Importing glTF file, {} bytes", data.len());
+
+    let opts = rcad_io::ImportOptions::new(); // scale = 1.0, keep the model's units
+    match rcad_io::gltf::import(std::io::Cursor::new(&data), &opts) {
+        Ok(model) => {
+            let meshes: Vec<rcad_geometry::Mesh> =
+                model.meshes.into_iter().map(|m| m.mesh).collect();
+            if meshes.is_empty() {
+                return Json(ImportResponse::error("glTF file contained no meshes"));
+            }
+            let resp = merge_meshes(&meshes);
+            tracing::info!(
+                "glTF imported: {} vertices, {} triangles",
+                resp.vertex_count,
+                resp.triangle_count
+            );
+            Json(resp)
+        }
+        Err(e) => {
+            tracing::warn!("glTF import failed: {e}");
+            Json(ImportResponse::error(format!("glTF import failed: {e}")))
+        }
+    }
+}
+
 /// IGES import is not supported (no pure-Rust IGES parser; needs OpenCASCADE).
 pub async fn import_iges(mut _multipart: Multipart) -> impl IntoResponse {
     Json(ImportResponse::error(

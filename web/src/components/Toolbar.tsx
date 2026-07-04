@@ -177,7 +177,7 @@ export function Toolbar() {
       <input
         ref={fileInputRef}
         type="file"
-        accept=".stl,.obj,.step,.stp,.iges,.igs,.rcad"
+        accept=".stl,.obj,.step,.stp,.gltf,.glb,.iges,.igs,.rcad"
         multiple
         className="hidden"
         onChange={handleFilesSelected}

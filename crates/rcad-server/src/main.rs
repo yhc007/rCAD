@@ -75,6 +75,7 @@ fn api_routes() -> Router {
         .route("/tripo/generate", post(api::tripo::generate))
         // Import endpoints
         .route("/import/step", post(api::import::import_step))
+        .route("/import/gltf", post(api::import::import_gltf))
         .route("/import/iges", post(api::import::import_iges))
         .route("/import/upload", post(api::import::upload_file))
         // Export endpoints

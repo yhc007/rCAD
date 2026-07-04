@@ -1,5 +1,5 @@
-// Unified file import: STL/OBJ are parsed client-side; STEP is sent to the
-// Rust server (truck-stepio) and returned as a tessellated mesh; IGES is
+// Unified file import: STL/OBJ are parsed client-side; STEP and glTF/GLB are
+// sent to the Rust server and returned as a tessellated mesh; IGES is
 // unsupported.
 
 import { parseSTL, parseOBJ, type MeshGeometry, type ImportedMesh } from './meshParsers';
@@ -30,14 +30,14 @@ function deindex(d: ServerMesh): MeshGeometry {
   return { positions, normals, vertexCount: n };
 }
 
-async function importStepViaServer(file: File): Promise<MeshGeometry> {
+async function importViaServer(file: File, endpoint: string, label: string): Promise<MeshGeometry> {
   const form = new FormData();
   form.append('file', file);
-  const res = await fetch('/api/import/step', { method: 'POST', body: form });
+  const res = await fetch(endpoint, { method: 'POST', body: form });
   if (!res.ok) throw new Error(`server returned ${res.status}`);
   const data: ServerMesh = await res.json();
-  if (!data.success) throw new Error(data.message || 'STEP import failed');
-  if (!data.indices?.length) throw new Error('STEP produced no geometry');
+  if (!data.success) throw new Error(data.message || `${label} import failed`);
+  if (!data.indices?.length) throw new Error(`${label} produced no geometry`);
   return deindex(data);
 }
 
@@ -51,11 +51,14 @@ export async function importMeshFile(file: File): Promise<ImportedMesh> {
       return { name: file.name, geometry: parseOBJ(await file.text()) };
     case 'step':
     case 'stp':
-      return { name: file.name, geometry: await importStepViaServer(file) };
+      return { name: file.name, geometry: await importViaServer(file, '/api/import/step', 'STEP') };
+    case 'gltf':
+    case 'glb':
+      return { name: file.name, geometry: await importViaServer(file, '/api/import/gltf', 'glTF') };
     case 'iges':
     case 'igs':
-      throw new Error('IGES is not supported — convert to STEP, STL, or OBJ.');
+      throw new Error('IGES is not supported — convert to STEP, glTF/GLB, STL, or OBJ.');
     default:
-      throw new Error(`Unsupported file type: .${ext} (expected STL, OBJ, or STEP)`);
+      throw new Error(`Unsupported file type: .${ext} (expected STL, OBJ, STEP, or glTF/GLB)`);
   }
 }

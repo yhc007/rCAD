@@ -468,3 +468,17 @@ fn base64_encode(input: &[u8]) -> String {
 
     output
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::ExportOptions;
+
+    #[test]
+    #[ignore = "writes /tmp/box.gltf fixture for manual endpoint testing"]
+    fn dump_box_gltf() {
+        let solid = rcad_geometry::primitives::create_box(30.0, 30.0, 30.0).unwrap();
+        let mesh = rcad_geometry::tessellation::tessellate_default(&solid).unwrap();
+        let mut f = std::fs::File::create("/tmp/box.gltf").unwrap();
+        super::export(&mut f, &[(&mesh, Some("Box"))], &ExportOptions::default()).unwrap();
+    }
+}
