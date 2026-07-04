@@ -19,6 +19,9 @@ export interface Feature {
   // Base material color as linear RGB in 0..1 (assigned from a palette on
   // creation; editable in the Material panel). Drives the renderer per mesh.
   color?: [number, number, number];
+  // Process-twin binding: a telemetry tag whose live value colours this feature
+  // (a sensor/station attached to the model).
+  sensorTag?: string;
   // Physics properties (used by the Newton simulation)
   fixed?: boolean; // static anchor instead of a falling body
   mass?: number; // 0 = auto-compute from shape

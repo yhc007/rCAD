@@ -17,6 +17,32 @@ export function ProcessPanel({ open, onClose }: { open: boolean; onClose: () => 
   const { cad } = useCAD();
   const [building, setBuilding] = React.useState(false);
 
+  // Real camera feed (inspection camera): the browser webcam via getUserMedia.
+  const videoRef = React.useRef<HTMLVideoElement>(null);
+  const streamRef = React.useRef<MediaStream | null>(null);
+  const [camOn, setCamOn] = React.useState(false);
+  const [camErr, setCamErr] = React.useState<string | null>(null);
+  const startCam = async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+      streamRef.current = stream;
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+        await videoRef.current.play().catch(() => {});
+      }
+      setCamOn(true);
+      setCamErr(null);
+    } catch (e) {
+      setCamErr(e instanceof Error ? e.message : 'camera unavailable');
+    }
+  };
+  const stopCam = () => {
+    streamRef.current?.getTracks().forEach((t) => t.stop());
+    streamRef.current = null;
+    setCamOn(false);
+  };
+  React.useEffect(() => () => stopCam(), []); // stop the camera on unmount
+
   React.useEffect(() => {
     if (!open) return;
     connect();
@@ -33,10 +59,15 @@ export function ProcessPanel({ open, onClose }: { open: boolean; onClose: () => 
       const conv = await cad.addPrimitive('box', [300, 10, 40]);
       await cad.moveFeature(conv, 150, -5, 0); // belt top at Y=0, spanning x 0..300
       await cad.setFeatureProps(conv, { color: [0.28, 0.3, 0.34] });
-      for (const x of [100, 220]) {
+      // Sensor markers bound to live tags → they light up in the 3D twin.
+      const markers: [string, number][] = [
+        ['station1.proximity', 100],
+        ['station2.busy', 220],
+      ];
+      for (const [tag, x] of markers) {
         const st = await cad.addPrimitive('box', [8, 8, 8]);
         await cad.moveFeature(st, x, 32, 0); // sensor marker above the belt
-        await cad.setFeatureProps(st, { color: [0.5, 0.5, 0.55] });
+        await cad.setFeatureProps(st, { color: [0.32, 0.34, 0.4], sensorTag: tag });
       }
       // Inspection camera marker over station 2 (the vision station).
       const cam = await cad.addPrimitive('box', [10, 6, 6]);
@@ -160,6 +191,33 @@ export function ProcessPanel({ open, onClose }: { open: boolean; onClose: () => 
             ))}
             <rect x={pos - 9} y={34} width={18} height={32} rx={2} fill={partFill} />
           </svg>
+        </div>
+
+        {/* Inspection camera (real webcam feed) */}
+        <div className="w-52 border-l border-cad-border p-2 flex flex-col">
+          <div className="text-xs text-cad-text-muted mb-1 flex items-center justify-between">
+            <span>Inspection cam · S2</span>
+            <button className="text-cad-accent hover:underline" onClick={camOn ? stopCam : startCam}>
+              {camOn ? 'stop' : 'start'}
+            </button>
+          </div>
+          <div className="relative flex-1 bg-black rounded overflow-hidden flex items-center justify-center">
+            <video ref={videoRef} muted playsInline className="w-full h-full object-cover" />
+            {!camOn && (
+              <span className="absolute text-[11px] text-cad-text-muted px-2 text-center">
+                {camErr ?? 'camera off'}
+              </span>
+            )}
+            {camOn && result && result !== '—' && (
+              <span
+                className={`absolute top-1 left-1 px-1.5 py-0.5 rounded text-xs font-bold text-white ${
+                  result === 'PASS' ? 'bg-green-600/80' : 'bg-red-600/80'
+                }`}
+              >
+                {result}
+              </span>
+            )}
+          </div>
         </div>
 
         {/* Tag inspector */}

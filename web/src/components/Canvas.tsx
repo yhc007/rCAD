@@ -178,30 +178,37 @@ export function Canvas() {
     setMeshes(ids.map((id) => meshes[id]), fit, ids.map(colorOf));
   }, [meshes, features, simulation, setMeshes]);
 
-  // Process-twin binding: drive the bound "part" feature's rendered position from
-  // the live conveyor.position tag (renderer override, not a document command),
-  // so the real 3D part rides the belt and stops at stations.
+  // Process-twin binding: while telemetry is live, drive the bound "part"
+  // feature's rendered position from conveyor.position AND colour every
+  // sensor-tagged feature (a sensor/station attached to the model) from its
+  // live tag value — a renderer override, not a document command.
   const twinPartId = useTelemetryStore((s) => s.twinPartId);
   const twinSnapshot = useTelemetryStore((s) => s.snapshot);
   useEffect(() => {
-    if (simulation || !twinPartId || !twinSnapshot) return;
+    if (simulation || !twinSnapshot) return;
     const st = useDocumentStore.getState();
-    if (!st.meshes[twinPartId]) return;
-    const pos = Number(twinSnapshot.tags['conveyor.position'] ?? 0);
-    const result = twinSnapshot.tags['inspection.result'];
+    const tags = twinSnapshot.tags;
+    const pos = Number(tags['conveyor.position'] ?? 0);
+    const result = tags['inspection.result'];
     const ids = Object.keys(st.meshes);
-    const featColor = (id: string): [number, number, number] =>
-      st.features.find((f) => f.id === id)?.color ?? [0.6, 0.6, 0.7];
-    // The part turns green/red after inspection, else its own colour.
-    const colorOf = (id: string): [number, number, number] =>
-      id === twinPartId
-        ? result === 'PASS'
-          ? [0.2, 0.78, 0.32]
-          : result === 'FAIL'
-          ? [0.85, 0.2, 0.2]
-          : featColor(id)
-        : featColor(id);
-    const list = ids.map((id) => (id === twinPartId ? offsetGeom(st.meshes[id], [pos, 0, 0]) : st.meshes[id]));
+    const featOf = (id: string) => st.features.find((f) => f.id === id);
+    // A tag value → an indicator colour.
+    const tagColor = (v: unknown): [number, number, number] => {
+      if (v === 'PASS' || v === true) return [0.2, 0.78, 0.32];
+      if (v === 'FAIL') return [0.85, 0.2, 0.2];
+      if (typeof v === 'number' && v > 0) return [0.9, 0.7, 0.2];
+      return [0.32, 0.34, 0.4]; // idle / false
+    };
+    const colorOf = (id: string): [number, number, number] => {
+      const f = featOf(id);
+      if (id === twinPartId) {
+        return result === 'PASS' ? [0.2, 0.78, 0.32] : result === 'FAIL' ? [0.85, 0.2, 0.2] : f?.color ?? [0.6, 0.6, 0.7];
+      }
+      if (f?.sensorTag && f.sensorTag in tags) return tagColor(tags[f.sensorTag]);
+      return f?.color ?? [0.6, 0.6, 0.7];
+    };
+    const havePart = twinPartId && st.meshes[twinPartId];
+    const list = ids.map((id) => (havePart && id === twinPartId ? offsetGeom(st.meshes[id], [pos, 0, 0]) : st.meshes[id]));
     setMeshes(list, false, ids.map(colorOf));
   }, [twinSnapshot, twinPartId, simulation, setMeshes]);
 

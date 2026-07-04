@@ -74,6 +74,7 @@ interface Feature {
   rotation?: [number, number, number];
   params?: number[];
   color?: [number, number, number];
+  sensorTag?: string;
   fixed?: boolean;
   mass?: number;
 }
@@ -191,6 +192,26 @@ function FeatureProperties({ feature }: { feature: Feature }) {
       <PropertySection title="Transform">
         <AxisEditor label="Position (Enter / blur)" value={pos} onCommit={commitPosition} step={5} />
         <AxisEditor label="Rotation° (Enter / blur)" value={rot} onCommit={commitRotation} step={15} />
+      </PropertySection>
+
+      <PropertySection title="Telemetry (Twin)">
+        <div>
+          <label className="text-xs text-cad-text-muted">Sensor tag binding</label>
+          <input
+            key={`${feature.id}-tag`}
+            type="text"
+            defaultValue={feature.sensorTag ?? ''}
+            placeholder="e.g. station1.proximity"
+            title="Bind this part's colour to a live telemetry tag"
+            onBlur={(e) =>
+              cad.setFeatureProps(feature.id, { sensorTag: e.target.value.trim() || undefined })
+            }
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') (e.currentTarget as HTMLInputElement).blur();
+            }}
+            className="w-full mt-1 px-2 py-1 bg-cad-bg border border-cad-border rounded text-sm text-cad-text font-mono"
+          />
+        </div>
       </PropertySection>
     </div>
   );
