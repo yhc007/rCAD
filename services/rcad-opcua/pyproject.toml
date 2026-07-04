@@ -1,0 +1,10 @@
+[project]
+name = "rcad-opcua"
+version = "0.1.0"
+description = "OPC UA <-> rCAD telemetry bridge for the process twin"
+requires-python = ">=3.10"
+dependencies = [
+    "asyncua>=1.1",
+    "websockets>=12",
+    "httpx>=0.27",
+]
