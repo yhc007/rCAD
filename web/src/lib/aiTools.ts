@@ -273,6 +273,53 @@ export const AI_TOOLS: ToolDef[] = [
     input_schema: { type: 'object', properties: {} },
   },
   {
+    name: 'get_flow_graph',
+    description: 'Read the current process line as a flow graph (its steps and transitions).',
+    input_schema: { type: 'object', properties: {} },
+  },
+  {
+    name: 'set_flow_graph',
+    description:
+      'Design the process line as a multi-step flow graph and restart it. Nodes are steps of kind: source (parts enter), process (a machining/assembly station), inspect (a QC check that yields pass/fail), or sink (parts exit, e.g. pack or reject). Edges connect steps; an edge leaving an inspect step may set when to "pass" or "fail" to route that branch (else it is unconditional). Cycles are allowed — send failed parts back to an earlier step for rework. pos is mm along the belt (left→right); y is the lane (0 = main belt, -1 = a branch below). Needs at least one source and one sink. Example: load(source)→mill(process)→qc(inspect), qc pass→pack(sink), qc fail→rework(process)→back to mill.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        nodes: {
+          type: 'array',
+          description: 'the process steps',
+          items: {
+            type: 'object',
+            properties: {
+              id: { type: 'string', description: 'unique step id' },
+              kind: { type: 'string', enum: ['source', 'process', 'inspect', 'sink'] },
+              pos: { type: 'number', description: 'mm along the belt (left→right)' },
+              y: { type: 'number', description: 'lane: 0 main belt, -1 branch below' },
+              dwell: { type: 'number', description: 'processing seconds (process/inspect)' },
+              fail_rate: { type: 'number', description: 'inspect defect percent 0–100' },
+              label: { type: 'string' },
+            },
+            required: ['id', 'kind'],
+          },
+        },
+        edges: {
+          type: 'array',
+          description: 'the transitions between steps',
+          items: {
+            type: 'object',
+            properties: {
+              from: { type: 'string' },
+              to: { type: 'string' },
+              when: { type: 'string', enum: ['pass', 'fail', 'always'] },
+            },
+            required: ['from', 'to'],
+          },
+        },
+        spawn_interval: { type: 'number', description: 'seconds between new parts (default 3)' },
+      },
+      required: ['nodes', 'edges'],
+    },
+  },
+  {
     name: 'select_feature',
     description: 'Select a part (or pass null to clear selection) so the user sees what you are working on.',
     input_schema: {
@@ -766,6 +813,48 @@ export async function executeTool(name: string, input: Input): Promise<unknown> 
           body: JSON.stringify({ rules: [], mode: 'replace' }),
         });
         return await res.json();
+      }
+
+      case 'get_flow_graph': {
+        return await (await fetch('/api/telemetry/graph')).json();
+      }
+
+      case 'set_flow_graph': {
+        const rawNodes = Array.isArray(input.nodes) ? input.nodes : [];
+        const rawEdges = Array.isArray(input.edges) ? input.edges : [];
+        // Build clean nodes; auto-space along the belt when pos is omitted so a
+        // graph still lays out sensibly (routing is by edges, not position).
+        const nodes = rawNodes.map((n, i) => {
+          const o = (n ?? {}) as Record<string, unknown>;
+          return {
+            id: String(o.id),
+            kind: String(o.kind),
+            pos: o.pos != null ? Number(o.pos) : i * 90,
+            y: o.y != null ? Number(o.y) : 0,
+            ...(o.dwell != null ? { dwell: Number(o.dwell) } : {}),
+            ...(o.fail_rate != null ? { fail_rate: Number(o.fail_rate) } : {}),
+            ...(o.label != null ? { label: String(o.label) } : {}),
+          };
+        });
+        const edges = rawEdges.map((e) => {
+          const o = (e ?? {}) as Record<string, unknown>;
+          const when = o.when == null || o.when === 'always' ? null : String(o.when);
+          return { from: String(o.from), to: String(o.to), when };
+        });
+        if (!nodes.some((n) => n.kind === 'source') || !nodes.some((n) => n.kind === 'sink')) {
+          return { ok: false, error: 'graph needs at least one source and one sink node' };
+        }
+        const graph = {
+          nodes,
+          edges,
+          spawn_interval: input.spawn_interval != null ? Number(input.spawn_interval) : 3,
+        };
+        const res = await fetch('/api/telemetry/graph', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ graph }),
+        });
+        return { steps: nodes.length, transitions: edges.length, ...(await res.json()) };
       }
 
       case 'select_feature': {
