@@ -73,67 +73,86 @@ export function ProcessPanel({ open, onClose }: { open: boolean; onClose: () => 
     if (camMode === 'url') disconnectSource();
     setCamOn(false);
   };
-  // Stop whichever source is active on unmount (webcam tracks + server camera).
+  // Stop whichever source is active on unmount (webcam tracks + server camera)
+  // and disarm synced capture.
   React.useEffect(
     () => () => {
       streamRef.current?.getTracks().forEach((t) => t.stop());
       disconnectSource();
+      fetch('/api/telemetry/inspect', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ online: false }),
+      }).catch(() => {});
     },
     [],
   );
 
-  // While the camera is on, grab a frame every ~1.5s, send it to the OpenCV
-  // vision service for a real PASS/FAIL, and feed that verdict back into the
-  // twin (overriding the mock inspection). Reverts to the mock when it stops.
+  // Capture one frame from the active source (webcam or industrial camera) and
+  // return the OpenCV verdict. Used per-part, on arrival — not on a timer.
+  const captureVerdict = React.useCallback(async (): Promise<{ result: string; defect: number } | null> => {
+    try {
+      if (camMode === 'url') {
+        // The vision service pulls the current frame from the industrial camera.
+        const d = await (await fetch('/vision/inspect_source', { method: 'POST' })).json();
+        return d.ok ? { result: d.result, defect: d.defect_ratio } : null;
+      }
+      const v = videoRef.current;
+      if (!v || !v.videoWidth) return null;
+      const cvs = document.createElement('canvas');
+      cvs.width = v.videoWidth;
+      cvs.height = v.videoHeight;
+      const ctx = cvs.getContext('2d');
+      if (!ctx) return null;
+      ctx.drawImage(v, 0, 0);
+      const image = cvs.toDataURL('image/jpeg', 0.7);
+      const d = await (
+        await fetch('/vision/inspect', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ image }),
+        })
+      ).json();
+      return d.ok ? { result: d.result, defect: d.defect_ratio } : null;
+    } catch {
+      return null; // vision service down → the engine falls back to the mock
+    }
+  }, [camMode]);
+
+  // Arm/disarm synced capture on the server when a camera turns on/off, so the
+  // engine only issues per-part capture requests while a camera is live.
   React.useEffect(() => {
-    if (!camOn) return;
+    fetch('/api/telemetry/inspect', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ online: camOn }),
+    }).catch(() => {});
+    if (!camOn) setVision(null);
+  }, [camOn]);
+
+  // Synced capture: when the engine issues a request id (a part reached the
+  // inspect station), capture exactly one frame and report the verdict for that
+  // request — the inspection is in step with the part's arrival.
+  const reqId = Number(snap?.tags['inspection.request'] ?? 0);
+  const handledReq = React.useRef(0);
+  React.useEffect(() => {
+    if (!camOn || reqId === 0 || handledReq.current === reqId) return;
+    handledReq.current = reqId;
     let alive = true;
-    const ingest = (tags: Record<string, unknown>) =>
-      fetch('/api/telemetry/ingest', {
+    (async () => {
+      const v = await captureVerdict();
+      if (!alive || !v) return;
+      setVision(v);
+      fetch('/api/telemetry/inspect', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ tags }),
+        body: JSON.stringify({ id: reqId, result: v.result }),
       }).catch(() => {});
-    const inspect = async () => {
-      try {
-        let d: { ok: boolean; result: string; defect_ratio: number };
-        if (camMode === 'url') {
-          // The vision service pulls the frame from the industrial camera.
-          d = await (await fetch('/vision/inspect_source', { method: 'POST' })).json();
-        } else {
-          const v = videoRef.current;
-          if (!v || !v.videoWidth) return;
-          const cvs = document.createElement('canvas');
-          cvs.width = v.videoWidth;
-          cvs.height = v.videoHeight;
-          const ctx = cvs.getContext('2d');
-          if (!ctx) return;
-          ctx.drawImage(v, 0, 0);
-          const image = cvs.toDataURL('image/jpeg', 0.7);
-          d = await (
-            await fetch('/vision/inspect', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ image }),
-            })
-          ).json();
-        }
-        if (!alive || !d.ok) return;
-        setVision({ result: d.result, defect: d.defect_ratio });
-        ingest({ 'inspection.result': d.result, 'vision.defect': d.defect_ratio });
-      } catch {
-        /* vision service down → keep the mock */
-      }
-    };
-    const id = setInterval(inspect, 1500);
-    inspect();
+    })();
     return () => {
       alive = false;
-      clearInterval(id);
-      setVision(null);
-      ingest({ 'inspection.result': null, 'vision.defect': null }); // revert to mock
     };
-  }, [camOn, camMode]);
+  }, [reqId, camOn, captureVerdict]);
 
   React.useEffect(() => {
     if (!open) return;

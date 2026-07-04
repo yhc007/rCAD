@@ -163,6 +163,11 @@ pub struct AppState {
     pub overrides: Arc<Mutex<serde_json::Map<String, Value>>>,
     pub rules: Arc<Mutex<Vec<Rule>>>,
     pub graph: Arc<Mutex<FlowGraph>>,
+    // Synced camera capture: `vision_armed` is set while a camera is live; the
+    // engine then issues a per-part capture request at the inspect station and
+    // waits for the verdict keyed by request id in `verdicts`.
+    pub vision_armed: Arc<Mutex<bool>>,
+    pub verdicts: Arc<Mutex<HashMap<u64, bool>>>,
 }
 
 /// Evaluate one rule's condition against the current tags.
@@ -186,6 +191,7 @@ fn eval_cond(tags: &serde_json::Map<String, Value>, r: &Rule) -> bool {
 const PROXIMITY: f64 = 12.0; // sensor trip window (± mm)
 const TICK_MS: u64 = 100;
 const MAX_PARTS: usize = 16; // WIP cap so a fast line can't run away
+const CAPTURE_TIMEOUT: f64 = 2.5; // s to wait for a synced camera verdict before mock
 
 /// Where a part is right now: dwelling at a node, or travelling an edge.
 #[derive(Clone, Copy)]
@@ -199,6 +205,8 @@ struct Part {
     id: u64,
     verdict: Option<bool>, // last inspection result it carries (routes branches)
     loc: Loc,
+    req_id: Option<u64>, // pending synced-capture request at an inspect station
+    wait_left: f64,      // time left waiting for that capture before mock fallback
 }
 
 fn node_idx(g: &FlowGraph, id: &str) -> Option<usize> {
@@ -265,20 +273,24 @@ fn node_dwell(n: &FlowNode, global: f64) -> f64 {
     }
 }
 
+/// Interpret a verdict string as pass/fail. "PASS"/"OK"/"GOOD"/"TRUE" → pass,
+/// "FAIL"/"NG"/"BAD"/"FALSE" → fail; None if unrecognized.
+fn parse_verdict_str(s: &str) -> Option<bool> {
+    let u = s.to_ascii_uppercase();
+    if u.contains("PASS") || u == "OK" || u == "TRUE" || u == "GOOD" {
+        Some(true)
+    } else if u.contains("FAIL") || u == "NG" || u == "FALSE" || u == "BAD" {
+        Some(false)
+    } else {
+        None
+    }
+}
+
 /// Interpret an external tag (e.g. the real vision verdict) as pass/fail.
 /// Accepts "PASS"/"FAIL"/"OK"/"NG"/bool; returns None if absent/unrecognized.
 fn ext_verdict(ext: &serde_json::Map<String, Value>, tag: &str) -> Option<bool> {
     match ext.get(tag) {
-        Some(Value::String(s)) => {
-            let u = s.to_ascii_uppercase();
-            if u.contains("PASS") || u == "OK" || u == "TRUE" || u == "GOOD" {
-                Some(true)
-            } else if u.contains("FAIL") || u == "NG" || u == "FALSE" || u == "BAD" {
-                Some(false)
-            } else {
-                None
-            }
-        }
+        Some(Value::String(s)) => parse_verdict_str(s),
         Some(Value::Bool(b)) => Some(*b),
         _ => None,
     }
@@ -295,6 +307,9 @@ fn advance_part(
     dwell: f64,
     fail_rate: f64,
     ext: &serde_json::Map<String, Value>,
+    armed: bool,
+    verdicts: &mut HashMap<u64, bool>,
+    req_seq: &mut u64,
     inspection_num: &mut u64,
     last_inspection: &mut Option<bool>,
     pass_count: &mut u64,
@@ -311,18 +326,56 @@ fn advance_part(
             }
             // Dwell finished: run the station's operation, then leave.
             if n.kind == "inspect" && !judged {
-                // Prefer a live external verdict (the real vision camera) when the
-                // node binds one and it is present; else fall back to the mock.
-                let external = n.verdict_tag.as_deref().and_then(|t| ext_verdict(ext, t));
-                let pass = external.unwrap_or_else(|| {
+                let vision = n.verdict_tag.is_some();
+                let mock = |num: &mut u64| {
                     let fr = n.fail_rate.unwrap_or(fail_rate);
-                    let h = (*inspection_num).wrapping_mul(2654435761) >> 8;
+                    let h = (*num).wrapping_mul(2654435761) >> 8;
+                    *num += 1;
                     (h % 100) as f64 >= fr
-                });
-                p.verdict = Some(pass);
-                *last_inspection = Some(pass);
-                *inspection_num += 1;
-                judged = true;
+                };
+                if vision && armed {
+                    // Synced capture: issue a request when the part arrives and hold
+                    // it until the client reports the verdict for that request id, or
+                    // the capture times out (then fall back to the mock).
+                    match p.req_id {
+                        None => {
+                            *req_seq += 1;
+                            p.req_id = Some(*req_seq);
+                            p.wait_left = CAPTURE_TIMEOUT;
+                            p.loc = Loc::At { node, dwell_left: 0.0, judged: false };
+                            return false; // wait for this part's capture
+                        }
+                        Some(rid) => {
+                            if let Some(v) = verdicts.remove(&rid) {
+                                p.verdict = Some(v);
+                                *last_inspection = Some(v);
+                                *inspection_num += 1;
+                                p.req_id = None;
+                                judged = true;
+                            } else {
+                                p.wait_left -= dt;
+                                if p.wait_left <= 0.0 {
+                                    let pass = mock(inspection_num);
+                                    p.verdict = Some(pass);
+                                    *last_inspection = Some(pass);
+                                    p.req_id = None;
+                                    judged = true;
+                                } else {
+                                    p.loc = Loc::At { node, dwell_left: 0.0, judged: false };
+                                    return false; // keep waiting for the capture
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    // A non-camera external verdict (MQTT/OPC UA/HTTP) if present,
+                    // else the mock.
+                    let external = n.verdict_tag.as_deref().and_then(|t| ext_verdict(ext, t));
+                    let pass = external.unwrap_or_else(|| mock(inspection_num));
+                    p.verdict = Some(pass);
+                    *last_inspection = Some(pass);
+                    judged = true;
+                }
                 let _ = judged; // consumed below via the edge choice
             }
             if n.kind == "sink" {
@@ -379,6 +432,7 @@ pub fn spawn_sim(state: AppState) {
         let mut counts: HashMap<String, u64> = HashMap::new();
         let mut last_pos = 0.0_f64;
         let mut t = 0.0_f64;
+        let mut req_seq: u64 = 0; // synced-capture request ids
         let mut last_fired: HashMap<String, bool> = HashMap::new(); // rule edge state
 
         loop {
@@ -407,6 +461,8 @@ pub fn spawn_sim(state: AppState) {
             // External tag overrides (a real gateway / the vision camera). Read
             // once per tick: used both to route inspect nodes and to overlay tags.
             let ext = state.overrides.lock().unwrap().clone();
+            let armed = *state.vision_armed.lock().unwrap();
+            let mut verdicts = state.verdicts.lock().unwrap();
 
             // Spawn a new part at the first source node on the spawn interval.
             spawn_timer += dt;
@@ -416,6 +472,8 @@ pub fn spawn_sim(state: AppState) {
                         id: next_id,
                         verdict: None,
                         loc: Loc::At { node: src, dwell_left: 0.0, judged: false },
+                        req_id: None,
+                        wait_left: 0.0,
                     });
                     next_id += 1;
                     spawn_timer = 0.0;
@@ -434,6 +492,9 @@ pub fn spawn_sim(state: AppState) {
                         dwell,
                         fail_rate,
                         &ext,
+                        armed,
+                        &mut verdicts,
+                        &mut req_seq,
                         &mut inspection_num,
                         &mut last_inspection,
                         &mut pass_count,
@@ -506,6 +567,13 @@ pub fn spawn_sim(state: AppState) {
             tags.insert("throughput.count".into(), json!(pass_count));
             tags.insert("reject.count".into(), json!(fail_count));
             tags.insert("wip.count".into(), json!(parts.len()));
+            // Synced camera capture: the id of the part currently awaiting a
+            // capture at an inspect station (0 = none). The client watches this and
+            // captures exactly one frame per new request, keeping the inspection in
+            // step with the part's arrival.
+            let active_req = parts.iter().find_map(|p| p.req_id).unwrap_or(0);
+            tags.insert("inspection.request".into(), json!(active_req));
+            tags.insert("inspection.awaiting".into(), json!(active_req != 0));
             // Per-station compatibility tags (kept for the default line's bindings).
             for sid in ["station1", "station2"] {
                 if let Some(n) = g.nodes.iter().find(|n| n.id == sid) {
@@ -522,11 +590,16 @@ pub fn spawn_sim(state: AppState) {
                 );
             }
 
-            // Report whether any inspect station is currently routing on a live
-            // external verdict (the real vision camera) vs the mock.
+            // Report whether inspect stations route on the real vision camera
+            // (armed synced-capture, or a non-camera external verdict) vs the mock.
             let vision_routing = g.nodes.iter().any(|n| {
                 n.kind == "inspect"
-                    && n.verdict_tag.as_deref().map(|t| ext.contains_key(t)).unwrap_or(false)
+                    && n.verdict_tag.is_some()
+                    && (armed
+                        || n.verdict_tag
+                            .as_deref()
+                            .map(|t| ext.contains_key(t))
+                            .unwrap_or(false))
             });
             tags.insert("inspection.routing".into(), json!(if vision_routing { "vision" } else { "mock" }));
 
@@ -716,6 +789,35 @@ pub async fn ingest(State(state): State<AppState>, Json(req): Json<IngestReq>) -
         }
     }
     Json(json!({ "ok": true, "overrides": ov.len() }))
+}
+
+#[derive(Deserialize)]
+pub struct InspectReport {
+    #[serde(default)]
+    online: Option<bool>, // arm/disarm synced capture (a camera came on/off)
+    #[serde(default)]
+    id: Option<u64>, // the request id this verdict answers
+    #[serde(default)]
+    result: Option<String>, // "PASS" / "FAIL"
+}
+
+/// `POST /api/telemetry/inspect` — the vision client (1) arms synced capture when
+/// a camera turns on/off, and (2) reports the verdict for a capture request the
+/// engine issued when a part reached the inspect station. So each part is judged
+/// by a frame captured at its own arrival, not a free-running override.
+pub async fn inspect_report(State(state): State<AppState>, Json(m): Json<InspectReport>) -> impl IntoResponse {
+    if let Some(online) = m.online {
+        *state.vision_armed.lock().unwrap() = online;
+        if !online {
+            state.verdicts.lock().unwrap().clear(); // pending parts fall back to mock
+        }
+    }
+    if let (Some(id), Some(res)) = (m.id, m.result) {
+        if let Some(v) = parse_verdict_str(&res) {
+            state.verdicts.lock().unwrap().insert(id, v);
+        }
+    }
+    Json(json!({ "ok": true, "armed": *state.vision_armed.lock().unwrap() }))
 }
 
 #[derive(Deserialize)]

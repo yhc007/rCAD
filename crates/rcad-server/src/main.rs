@@ -63,6 +63,8 @@ pub fn create_router() -> Router {
         overrides: std::sync::Arc::new(std::sync::Mutex::new(serde_json::Map::new())),
         rules: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
         graph: std::sync::Arc::new(std::sync::Mutex::new(process::default_graph())),
+        vision_armed: std::sync::Arc::new(std::sync::Mutex::new(false)),
+        verdicts: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
     };
     process::spawn_sim(state.clone());
     process::spawn_mqtt(state.clone()); // real-hardware bridge when MQTT_BROKER is set
@@ -92,6 +94,8 @@ fn api_routes() -> Router<process::AppState> {
         .route("/telemetry/status", get(process::status))
         // External tag ingress (real-hardware source over HTTP; MQTT feeds the same path)
         .route("/telemetry/ingest", post(process::ingest))
+        // Synced vision capture: arm a camera + report a per-part inspection verdict
+        .route("/telemetry/inspect", post(process::inspect_report))
         // Authorable automation rules (condition → action)
         .route("/telemetry/rules", get(process::get_rules).post(process::set_rules))
         // Authorable process flow graph (multi-step: source→process→inspect→sink)
