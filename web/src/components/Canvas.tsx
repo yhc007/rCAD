@@ -188,9 +188,19 @@ export function Canvas() {
     const st = useDocumentStore.getState();
     if (!st.meshes[twinPartId]) return;
     const pos = Number(twinSnapshot.tags['conveyor.position'] ?? 0);
+    const result = twinSnapshot.tags['inspection.result'];
     const ids = Object.keys(st.meshes);
-    const colorOf = (id: string): [number, number, number] =>
+    const featColor = (id: string): [number, number, number] =>
       st.features.find((f) => f.id === id)?.color ?? [0.6, 0.6, 0.7];
+    // The part turns green/red after inspection, else its own colour.
+    const colorOf = (id: string): [number, number, number] =>
+      id === twinPartId
+        ? result === 'PASS'
+          ? [0.2, 0.78, 0.32]
+          : result === 'FAIL'
+          ? [0.85, 0.2, 0.2]
+          : featColor(id)
+        : featColor(id);
     const list = ids.map((id) => (id === twinPartId ? offsetGeom(st.meshes[id], [pos, 0, 0]) : st.meshes[id]));
     setMeshes(list, false, ids.map(colorOf));
   }, [twinSnapshot, twinPartId, simulation, setMeshes]);

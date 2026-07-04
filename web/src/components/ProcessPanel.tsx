@@ -38,6 +38,10 @@ export function ProcessPanel({ open, onClose }: { open: boolean; onClose: () => 
         await cad.moveFeature(st, x, 32, 0); // sensor marker above the belt
         await cad.setFeatureProps(st, { color: [0.5, 0.5, 0.55] });
       }
+      // Inspection camera marker over station 2 (the vision station).
+      const cam = await cad.addPrimitive('box', [10, 6, 6]);
+      await cad.moveFeature(cam, 220, 52, 24);
+      await cad.setFeatureProps(cam, { color: [0.14, 0.14, 0.18] });
       const part = await cad.addPrimitive('box', [20, 20, 20]);
       await cad.moveFeature(part, 0, 10, 0); // sits on the belt at the start
       await cad.setFeatureProps(part, { color: [0.88, 0.55, 0.2] });
@@ -62,6 +66,8 @@ export function ProcessPanel({ open, onClose }: { open: boolean; onClose: () => 
   const near = (i: number) => !!snap?.tags[`station${i + 1}.proximity`];
   const busy = (i: number) => !!snap?.tags[`station${i + 1}.busy`];
   const anyBusy = busy(0) || busy(1);
+  const result = snap?.tags['inspection.result'];
+  const partFill = result === 'PASS' ? '#22c55e' : result === 'FAIL' ? '#ef4444' : anyBusy ? '#eab308' : '#e08a3c';
 
   return (
     <div className="absolute bottom-0 left-0 right-0 z-30 h-56 flex flex-col bg-cad-panel border-t border-cad-border shadow-2xl">
@@ -80,6 +86,17 @@ export function ProcessPanel({ open, onClose }: { open: boolean; onClose: () => 
         >
           {snap?.flow ?? '—'}
         </span>
+        {/* QC / inspection */}
+        {snap && (
+          <span className="ml-2 text-xs font-mono flex items-center gap-1">
+            <span className="text-cad-text-muted">QC</span>
+            <span className="text-green-400">{String(snap.tags['inspection.pass'] ?? 0)}✓</span>
+            <span className="text-red-400">{String(snap.tags['inspection.fail'] ?? 0)}✗</span>
+            <span className={result === 'PASS' ? 'text-green-400' : result === 'FAIL' ? 'text-red-400' : 'text-cad-text-muted'}>
+              {String(result ?? '—')}
+            </span>
+          </span>
+        )}
         {/* controls */}
         <div className="flex items-center gap-1 ml-3">
           <CtrlBtn title="Start" onClick={() => control('start')}><Play size={13} /></CtrlBtn>
@@ -122,7 +139,7 @@ export function ProcessPanel({ open, onClose }: { open: boolean; onClose: () => 
                 <text x={s} y={95} fontSize={7} fill="#888" textAnchor="middle">S{i + 1}</text>
               </g>
             ))}
-            <rect x={pos - 9} y={34} width={18} height={32} rx={2} fill={anyBusy ? '#eab308' : '#e08a3c'} />
+            <rect x={pos - 9} y={34} width={18} height={32} rx={2} fill={partFill} />
           </svg>
         </div>
 

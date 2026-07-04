@@ -32,12 +32,13 @@ pub type Tx = broadcast::Sender<String>;
 pub struct Control {
     pub running: bool,
     pub reset: bool,
-    pub dwell: f64, // station processing time (s)
-    pub speed: f64, // belt speed (mm/s)
+    pub dwell: f64,     // station processing time (s)
+    pub speed: f64,     // belt speed (mm/s)
+    pub fail_rate: f64, // mock vision defect rate at the inspection station (%)
 }
 impl Default for Control {
     fn default() -> Self {
-        Self { running: true, reset: false, dwell: 1.5, speed: 60.0 }
+        Self { running: true, reset: false, dwell: 1.5, speed: 60.0, fail_rate: 20.0 }
     }
 }
 
@@ -66,8 +67,12 @@ pub fn spawn_sim(state: AppState) {
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_millis(TICK_MS));
         let dt = TICK_MS as f64 / 1000.0;
+        const INSPECT: usize = 1; // station 2 is the vision-inspection station
         let mut pos = 0.0_f64;
-        let mut count: u64 = 0;
+        let mut pass_count: u64 = 0;
+        let mut fail_count: u64 = 0;
+        let mut inspection_num: u64 = 0;
+        let mut last_inspection: Option<bool> = None; // Some(pass) since last station 2
         let mut t = 0.0_f64;
         let mut flow = Flow::Moving;
         let mut dwell_left = 0.0_f64;
@@ -76,17 +81,20 @@ pub fn spawn_sim(state: AppState) {
             interval.tick().await;
 
             // Read + consume operator control.
-            let (running, dwell, speed) = {
+            let (running, dwell, speed, fail_rate) = {
                 let mut c = state.ctrl.lock().unwrap();
                 if c.reset {
                     c.reset = false;
                     pos = 0.0;
-                    count = 0;
+                    pass_count = 0;
+                    fail_count = 0;
+                    inspection_num = 0;
+                    last_inspection = None;
                     flow = Flow::Moving;
                     dwell_left = 0.0;
                     processed = [false; 2];
                 }
-                (c.running, c.dwell, c.speed)
+                (c.running, c.dwell, c.speed, c.fail_rate)
             };
             t += dt;
 
@@ -97,7 +105,12 @@ pub fn spawn_sim(state: AppState) {
                     pos += speed * dt;
                     if pos >= LENGTH {
                         pos -= LENGTH;
-                        count += 1; // one part completed the belt
+                        // Part left the belt → tally on its inspection verdict.
+                        match last_inspection {
+                            Some(false) => fail_count += 1,
+                            _ => pass_count += 1, // passed or never inspected
+                        }
+                        last_inspection = None;
                         processed = [false; 2];
                     }
                     for (i, &s) in STATIONS.iter().enumerate() {
@@ -110,10 +123,16 @@ pub fn spawn_sim(state: AppState) {
                         }
                     }
                 }
-                Flow::Processing(_) if running => {
+                Flow::Processing(i) if running => {
                     dwell_left -= dt;
                     if dwell_left <= 0.0 {
                         dwell_left = 0.0;
+                        if i == INSPECT {
+                            // Mock vision: deterministic pseudo-random pass/fail.
+                            let h = (inspection_num.wrapping_mul(2654435761) >> 8) % 100;
+                            last_inspection = Some((h as f64) >= fail_rate);
+                            inspection_num += 1;
+                        }
                         flow = Flow::Moving; // resume the belt
                     }
                 }
@@ -123,7 +142,13 @@ pub fn spawn_sim(state: AppState) {
             let busy = |i: usize| flow == Flow::Processing(i);
             let state_str = match flow {
                 Flow::Moving => "MOVING".to_string(),
+                Flow::Processing(i) if i == INSPECT => "INSPECTING · S2".to_string(),
                 Flow::Processing(i) => format!("PROCESSING · S{}", i + 1),
+            };
+            let inspection = match last_inspection {
+                Some(true) => "PASS",
+                Some(false) => "FAIL",
+                None => "—",
             };
             let near = |s: f64| (pos - s).abs() <= PROXIMITY;
             let snapshot = json!({
@@ -139,7 +164,11 @@ pub fn spawn_sim(state: AppState) {
                     "station1.busy": busy(0),
                     "station2.busy": busy(1),
                     "dwell.remaining": (dwell_left * 10.0).round() / 10.0,
-                    "throughput.count": count,
+                    "inspection.result": inspection,
+                    "inspection.pass": pass_count,
+                    "inspection.fail": fail_count,
+                    "throughput.count": pass_count,
+                    "reject.count": fail_count,
                 }
             });
             let msg = snapshot.to_string();
@@ -180,6 +209,7 @@ pub struct ControlReq {
     command: String,
     dwell: Option<f64>,
     speed: Option<f64>,
+    fail_rate: Option<f64>,
 }
 
 /// `POST /api/telemetry/control` — supervisory control: start/stop/reset plus
@@ -201,7 +231,10 @@ pub async fn control(State(state): State<AppState>, Json(req): Json<ControlReq>)
     if let Some(s) = req.speed {
         c.speed = s.clamp(0.0, 300.0);
     }
-    Json(json!({ "ok": true, "running": c.running, "dwell": c.dwell, "speed": c.speed }))
+    if let Some(fr) = req.fail_rate {
+        c.fail_rate = fr.clamp(0.0, 100.0);
+    }
+    Json(json!({ "ok": true, "running": c.running, "dwell": c.dwell, "speed": c.speed, "fail_rate": c.fail_rate }))
 }
 
 /// `GET /api/telemetry/status` — the latest tag snapshot (for the AI copilot),
@@ -210,14 +243,15 @@ pub async fn control(State(state): State<AppState>, Json(req): Json<ControlReq>)
 pub async fn status(State(state): State<AppState>) -> impl IntoResponse {
     let s = state.latest.lock().unwrap().clone();
     let mut value: serde_json::Value = serde_json::from_str(&s).unwrap_or_else(|_| json!({}));
-    let (speed, dwell, running) = {
+    let (speed, dwell, running, fail_rate) = {
         let c = state.ctrl.lock().unwrap();
-        (c.speed, c.dwell, c.running)
+        (c.speed, c.dwell, c.running, c.fail_rate)
     };
     if let Some(tags) = value.get_mut("tags").and_then(|t| t.as_object_mut()) {
         tags.insert("conveyor.speed".into(), json!(speed));
         tags.insert("station.dwell".into(), json!(dwell));
         tags.insert("conveyor.enabled".into(), json!(running));
+        tags.insert("inspection.fail_rate".into(), json!(fail_rate));
     }
     Json(value)
 }

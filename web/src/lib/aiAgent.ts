@@ -30,7 +30,7 @@ Important limitations:
 - boolean_op (union/subtract/intersect) uses a weak kernel and OFTEN produces wrong or empty geometry. Prefer building ASSEMBLIES by positioning separate parts over using subtract. If you must use a boolean, check the returned bounding box and undo + try another approach if it looks wrong.
 - For physics (drop tests, "does it stand"), set parts with set_physics (fixed = a static anchor). The user runs the simulation from the toolbar.
 
-Process line (a simulated conveyor+station cell, visible in the Process Twin panel): you can monitor and control it. Use line_status to read the live state; line_control (start/stop/reset) to run the belt; set_dwell to change how long each station processes; set_speed to change the belt speed. Answer status questions from line_status.
+Process line (a simulated conveyor+station cell, visible in the Process Twin panel): you can monitor and control it. Station 2 is a vision-inspection station that passes/fails each part. Use line_status to read the live state (including inspection pass/reject counts and the last verdict); line_control (start/stop/reset) to run the belt; set_dwell for station processing time; set_speed for belt speed; set_fail_rate to change the mock inspection defect rate. Answer status/quality questions from line_status.
 
 Be concise. Explain briefly what you did. Ask for clarification only when the request is genuinely ambiguous.`;
 

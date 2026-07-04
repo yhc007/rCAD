@@ -240,6 +240,12 @@ export const AI_TOOLS: ToolDef[] = [
     input_schema: { type: 'object', properties: { mm_per_s: num }, required: ['mm_per_s'] },
   },
   {
+    name: 'set_fail_rate',
+    description:
+      'Set the mock vision inspection defect rate at station 2, in percent (0–100). Parts failing inspection are counted as rejects.',
+    input_schema: { type: 'object', properties: { percent: num }, required: ['percent'] },
+  },
+  {
     name: 'select_feature',
     description: 'Select a part (or pass null to clear selection) so the user sees what you are working on.',
     input_schema: {
@@ -660,7 +666,10 @@ export async function executeTool(name: string, input: Input): Promise<unknown> 
           position: t['conveyor.position'],
           speed: t['conveyor.speed'],
           dwell: t['station.dwell'],
-          throughput: t['throughput.count'],
+          throughput_passed: t['throughput.count'],
+          rejected: t['reject.count'],
+          inspection_last: t['inspection.result'],
+          inspection_fail_rate: t['inspection.fail_rate'],
           station1_busy: t['station1.busy'],
           station2_busy: t['station2.busy'],
         };
@@ -689,6 +698,15 @@ export async function executeTool(name: string, input: Input): Promise<unknown> 
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ command: 'config', speed: Math.max(0, Number(input.mm_per_s) || 0) }),
+        });
+        return await res.json();
+      }
+
+      case 'set_fail_rate': {
+        const res = await fetch('/api/telemetry/control', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ command: 'config', fail_rate: Math.max(0, Math.min(100, Number(input.percent) || 0)) }),
         });
         return await res.json();
       }

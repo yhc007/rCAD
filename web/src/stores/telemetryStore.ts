@@ -8,7 +8,7 @@ export interface Snapshot {
   time: number;
   flow: string;
   layout: { length: number; stations: number[] };
-  tags: Record<string, number | boolean>;
+  tags: Record<string, number | boolean | string>;
 }
 
 interface TelemetryState {
