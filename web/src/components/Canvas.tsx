@@ -2,6 +2,7 @@ import React, { useRef, useEffect, useCallback, useState } from 'react';
 import { useWebGPU } from '../hooks/useWebGPU';
 import { useCAD } from '../hooks/useCAD';
 import { useDocumentStore } from '../stores/documentStore';
+import { useTelemetryStore } from '../stores/telemetryStore';
 import { importMeshFile } from '../lib/importFile';
 import { transformGeometryByPose } from '../lib/physics';
 import type { MeshGeometry } from '../lib/meshParsers';
@@ -176,6 +177,23 @@ export function Canvas() {
       features.find((f) => f.id === id)?.color ?? [0.6, 0.6, 0.7];
     setMeshes(ids.map((id) => meshes[id]), fit, ids.map(colorOf));
   }, [meshes, features, simulation, setMeshes]);
+
+  // Process-twin binding: drive the bound "part" feature's rendered position from
+  // the live conveyor.position tag (renderer override, not a document command),
+  // so the real 3D part rides the belt and stops at stations.
+  const twinPartId = useTelemetryStore((s) => s.twinPartId);
+  const twinSnapshot = useTelemetryStore((s) => s.snapshot);
+  useEffect(() => {
+    if (simulation || !twinPartId || !twinSnapshot) return;
+    const st = useDocumentStore.getState();
+    if (!st.meshes[twinPartId]) return;
+    const pos = Number(twinSnapshot.tags['conveyor.position'] ?? 0);
+    const ids = Object.keys(st.meshes);
+    const colorOf = (id: string): [number, number, number] =>
+      st.features.find((f) => f.id === id)?.color ?? [0.6, 0.6, 0.7];
+    const list = ids.map((id) => (id === twinPartId ? offsetGeom(st.meshes[id], [pos, 0, 0]) : st.meshes[id]));
+    setMeshes(list, false, ids.map(colorOf));
+  }, [twinSnapshot, twinPartId, simulation, setMeshes]);
 
   // Apply a single simulation frame: transform each rest mesh by its body pose.
   const applyFrame = useCallback(

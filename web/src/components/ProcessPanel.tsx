@@ -1,50 +1,51 @@
 import React from 'react';
-import { Activity, X, Play, Pause, RotateCcw } from 'lucide-react';
-
-interface Snapshot {
-  time: number;
-  flow: string;
-  layout: { length: number; stations: number[] };
-  tags: Record<string, number | boolean>;
-}
+import { Activity, X, Play, Pause, RotateCcw, Boxes } from 'lucide-react';
+import { useTelemetryStore } from '../stores/telemetryStore';
+import { useCAD } from '../hooks/useCAD';
 
 // Live process digital-twin: streams tag telemetry from the mock conveyor flow
 // (server /api/telemetry/ws), visualises the belt + flow state, and lets the
 // operator start/stop/reset the line (supervisory control → /api/telemetry/
-// control). Tag-keyed, so the source can later be a real MQTT / OPC UA gateway.
+// control). "Build cell" spawns a 3D conveyor+part+stations whose part rides the
+// belt live. Tag-keyed, so the source can later be a real MQTT / OPC UA gateway.
 export function ProcessPanel({ open, onClose }: { open: boolean; onClose: () => void }) {
-  const [snap, setSnap] = React.useState<Snapshot | null>(null);
-  const [connected, setConnected] = React.useState(false);
+  const snap = useTelemetryStore((s) => s.snapshot);
+  const connected = useTelemetryStore((s) => s.connected);
+  const connect = useTelemetryStore((s) => s.connect);
+  const disconnect = useTelemetryStore((s) => s.disconnect);
+  const setTwinPart = useTelemetryStore((s) => s.setTwinPart);
+  const { cad } = useCAD();
+  const [building, setBuilding] = React.useState(false);
 
   React.useEffect(() => {
     if (!open) return;
-    let ws: WebSocket | null = null;
-    let retry: ReturnType<typeof setTimeout> | undefined;
-    let closed = false;
-    const connect = () => {
-      const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-      ws = new WebSocket(`${proto}://${location.host}/api/telemetry/ws`);
-      ws.onopen = () => setConnected(true);
-      ws.onmessage = (e) => {
-        try {
-          setSnap(JSON.parse(e.data));
-        } catch {
-          /* ignore */
-        }
-      };
-      ws.onclose = () => {
-        setConnected(false);
-        if (!closed) retry = setTimeout(connect, 1000);
-      };
-      ws.onerror = () => ws?.close();
-    };
     connect();
-    return () => {
-      closed = true;
-      if (retry) clearTimeout(retry);
-      ws?.close();
-    };
-  }, [open]);
+    return () => disconnect();
+  }, [open, connect, disconnect]);
+
+  // Spawn a demo cell: a belt (x 0..300), two sensor markers, and a part that
+  // the Canvas binds to conveyor.position so it rides the belt live.
+  const buildCell = async () => {
+    if (building) return;
+    setBuilding(true);
+    try {
+      await cad.newDoc();
+      const conv = await cad.addPrimitive('box', [300, 10, 40]);
+      await cad.moveFeature(conv, 150, -5, 0); // belt top at Y=0, spanning x 0..300
+      await cad.setFeatureProps(conv, { color: [0.28, 0.3, 0.34] });
+      for (const x of [100, 220]) {
+        const st = await cad.addPrimitive('box', [8, 8, 8]);
+        await cad.moveFeature(st, x, 32, 0); // sensor marker above the belt
+        await cad.setFeatureProps(st, { color: [0.5, 0.5, 0.55] });
+      }
+      const part = await cad.addPrimitive('box', [20, 20, 20]);
+      await cad.moveFeature(part, 0, 10, 0); // sits on the belt at the start
+      await cad.setFeatureProps(part, { color: [0.88, 0.55, 0.2] });
+      setTwinPart(part);
+    } finally {
+      setBuilding(false);
+    }
+  };
 
   const control = (command: string) =>
     fetch('/api/telemetry/control', {
@@ -84,6 +85,14 @@ export function ProcessPanel({ open, onClose }: { open: boolean; onClose: () => 
           <CtrlBtn title="Start" onClick={() => control('start')}><Play size={13} /></CtrlBtn>
           <CtrlBtn title="Stop" onClick={() => control('stop')}><Pause size={13} /></CtrlBtn>
           <CtrlBtn title="Reset" onClick={() => control('reset')}><RotateCcw size={13} /></CtrlBtn>
+          <button
+            title="Build 3D cell"
+            onClick={buildCell}
+            disabled={building}
+            className="ml-1 flex items-center gap-1 px-2 py-1 rounded bg-cad-bg border border-cad-border text-cad-text text-xs hover:border-cad-accent disabled:opacity-50"
+          >
+            <Boxes size={13} /> Build cell
+          </button>
         </div>
         <span className="text-xs text-cad-text-muted ml-3">t={snap?.time ?? 0}s</span>
         <button className="ml-auto text-cad-text-muted hover:text-cad-text" onClick={onClose} title="Close">
