@@ -29,6 +29,12 @@ export default defineConfig({
         changeOrigin: true,
         rewrite: (p) => p.replace(/^\/physics/, ''),
       },
+      // OpenCV vision microservice (services/rcad-vision); strip the prefix
+      '/vision': {
+        target: 'http://127.0.0.1:8001',
+        changeOrigin: true,
+        rewrite: (p) => p.replace(/^\/vision/, ''),
+      },
     },
   },
   build: {

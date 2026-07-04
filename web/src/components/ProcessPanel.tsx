@@ -22,6 +22,7 @@ export function ProcessPanel({ open, onClose }: { open: boolean; onClose: () => 
   const streamRef = React.useRef<MediaStream | null>(null);
   const [camOn, setCamOn] = React.useState(false);
   const [camErr, setCamErr] = React.useState<string | null>(null);
+  const [vision, setVision] = React.useState<{ result: string; defect: number } | null>(null);
   const startCam = async () => {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
@@ -42,6 +43,53 @@ export function ProcessPanel({ open, onClose }: { open: boolean; onClose: () => 
     setCamOn(false);
   };
   React.useEffect(() => () => stopCam(), []); // stop the camera on unmount
+
+  // While the camera is on, grab a frame every ~1.5s, send it to the OpenCV
+  // vision service for a real PASS/FAIL, and feed that verdict back into the
+  // twin (overriding the mock inspection). Reverts to the mock when it stops.
+  React.useEffect(() => {
+    if (!camOn) return;
+    let alive = true;
+    const ingest = (tags: Record<string, unknown>) =>
+      fetch('/api/telemetry/ingest', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ tags }),
+      }).catch(() => {});
+    const inspect = async () => {
+      const v = videoRef.current;
+      if (!v || !v.videoWidth) return;
+      const cvs = document.createElement('canvas');
+      cvs.width = v.videoWidth;
+      cvs.height = v.videoHeight;
+      const ctx = cvs.getContext('2d');
+      if (!ctx) return;
+      ctx.drawImage(v, 0, 0);
+      const image = cvs.toDataURL('image/jpeg', 0.7);
+      try {
+        const d = await (
+          await fetch('/vision/inspect', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ image }),
+          })
+        ).json();
+        if (!alive || !d.ok) return;
+        setVision({ result: d.result, defect: d.defect_ratio });
+        ingest({ 'inspection.result': d.result, 'vision.defect': d.defect_ratio });
+      } catch {
+        /* vision service down → keep the mock */
+      }
+    };
+    const id = setInterval(inspect, 1500);
+    inspect();
+    return () => {
+      alive = false;
+      clearInterval(id);
+      setVision(null);
+      ingest({ 'inspection.result': null, 'vision.defect': null }); // revert to mock
+    };
+  }, [camOn]);
 
   React.useEffect(() => {
     if (!open) return;
@@ -208,13 +256,23 @@ export function ProcessPanel({ open, onClose }: { open: boolean; onClose: () => 
                 {camErr ?? 'camera off'}
               </span>
             )}
-            {camOn && result && result !== '—' && (
-              <span
-                className={`absolute top-1 left-1 px-1.5 py-0.5 rounded text-xs font-bold text-white ${
-                  result === 'PASS' ? 'bg-green-600/80' : 'bg-red-600/80'
-                }`}
-              >
-                {result}
+            {camOn && vision && (
+              <div className="absolute top-1 left-1 flex flex-col gap-0.5 items-start">
+                <span
+                  className={`px-1.5 py-0.5 rounded text-xs font-bold text-white ${
+                    vision.result === 'PASS' ? 'bg-green-600/80' : 'bg-red-600/80'
+                  }`}
+                >
+                  {vision.result}
+                </span>
+                <span className="text-[10px] text-white bg-black/50 px-1 rounded">
+                  defect {Math.round(vision.defect * 100)}%
+                </span>
+              </div>
+            )}
+            {camOn && (
+              <span className="absolute bottom-1 right-1 text-[10px] px-1 rounded bg-cad-accent/70 text-white">
+                OpenCV
               </span>
             )}
           </div>
