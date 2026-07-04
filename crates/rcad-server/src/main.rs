@@ -59,6 +59,7 @@ pub fn create_router() -> Router {
     let state = process::AppState {
         tx,
         ctrl: std::sync::Arc::new(std::sync::Mutex::new(process::Control::default())),
+        latest: std::sync::Arc::new(std::sync::Mutex::new(String::from("{}"))),
     };
     process::spawn_sim(state.clone());
 
@@ -82,8 +83,9 @@ fn api_routes() -> Router<process::AppState> {
     Router::new()
         // Process digital-twin telemetry stream (mock sim → tags over WebSocket)
         .route("/telemetry/ws", get(process::telemetry_ws))
-        // Supervisory line control (start/stop/reset)
+        // Supervisory line control (start/stop/reset/config) + status
         .route("/telemetry/control", post(process::control))
+        .route("/telemetry/status", get(process::status))
         // AI copilot (proxies the GLM chat API; key stays server-side)
         .route("/ai/chat", post(api::ai::chat))
         // Tripo text-to-3D generation → merged mesh

@@ -33,22 +33,24 @@ pub struct Control {
     pub running: bool,
     pub reset: bool,
     pub dwell: f64, // station processing time (s)
+    pub speed: f64, // belt speed (mm/s)
 }
 impl Default for Control {
     fn default() -> Self {
-        Self { running: true, reset: false, dwell: 1.5 }
+        Self { running: true, reset: false, dwell: 1.5, speed: 60.0 }
     }
 }
 
-/// Router state: telemetry bus + shared control.
+/// Router state: telemetry bus + shared control + the latest snapshot (so the
+/// AI copilot can read line status over REST without an open WebSocket).
 #[derive(Clone)]
 pub struct AppState {
     pub tx: Tx,
     pub ctrl: Arc<Mutex<Control>>,
+    pub latest: Arc<Mutex<String>>,
 }
 
 const LENGTH: f64 = 300.0; // conveyor length (mm)
-const SPEED: f64 = 60.0; // mm/s
 const STATIONS: [f64; 2] = [100.0, 220.0];
 const PROXIMITY: f64 = 12.0; // sensor trip window (± mm)
 const TICK_MS: u64 = 100;
@@ -74,7 +76,7 @@ pub fn spawn_sim(state: AppState) {
             interval.tick().await;
 
             // Read + consume operator control.
-            let (running, dwell) = {
+            let (running, dwell, speed) = {
                 let mut c = state.ctrl.lock().unwrap();
                 if c.reset {
                     c.reset = false;
@@ -84,7 +86,7 @@ pub fn spawn_sim(state: AppState) {
                     dwell_left = 0.0;
                     processed = [false; 2];
                 }
-                (c.running, c.dwell)
+                (c.running, c.dwell, c.speed)
             };
             t += dt;
 
@@ -92,7 +94,7 @@ pub fn spawn_sim(state: AppState) {
             match flow {
                 Flow::Moving if running => {
                     conveyor_running = true;
-                    pos += SPEED * dt;
+                    pos += speed * dt;
                     if pos >= LENGTH {
                         pos -= LENGTH;
                         count += 1; // one part completed the belt
@@ -129,7 +131,7 @@ pub fn spawn_sim(state: AppState) {
                 "layout": { "length": LENGTH, "stations": STATIONS },
                 "flow": state_str,
                 "tags": {
-                    "conveyor.speed": SPEED,
+                    "conveyor.speed": speed,
                     "conveyor.position": (pos * 10.0).round() / 10.0,
                     "conveyor.running": conveyor_running,
                     "station1.proximity": near(STATIONS[0]),
@@ -140,7 +142,9 @@ pub fn spawn_sim(state: AppState) {
                     "throughput.count": count,
                 }
             });
-            let _ = state.tx.send(snapshot.to_string());
+            let msg = snapshot.to_string();
+            *state.latest.lock().unwrap() = msg.clone();
+            let _ = state.tx.send(msg);
         }
     });
 }
@@ -175,9 +179,11 @@ async fn handle_socket(socket: WebSocket, mut rx: broadcast::Receiver<String>) {
 pub struct ControlReq {
     command: String,
     dwell: Option<f64>,
+    speed: Option<f64>,
 }
 
-/// `POST /api/telemetry/control` — supervisory start/stop/reset of the line.
+/// `POST /api/telemetry/control` — supervisory control: start/stop/reset plus
+/// dwell/speed config (any command may carry dwell/speed).
 pub async fn control(State(state): State<AppState>, Json(req): Json<ControlReq>) -> impl IntoResponse {
     let mut c = state.ctrl.lock().unwrap();
     match req.command.as_str() {
@@ -187,10 +193,31 @@ pub async fn control(State(state): State<AppState>, Json(req): Json<ControlReq>)
             c.reset = true;
             c.running = true;
         }
-        _ => {}
+        _ => {} // "config" / anything else → just apply dwell/speed below
     }
     if let Some(d) = req.dwell {
         c.dwell = d.clamp(0.0, 30.0);
     }
-    Json(json!({ "ok": true, "running": c.running, "dwell": c.dwell }))
+    if let Some(s) = req.speed {
+        c.speed = s.clamp(0.0, 300.0);
+    }
+    Json(json!({ "ok": true, "running": c.running, "dwell": c.dwell, "speed": c.speed }))
+}
+
+/// `GET /api/telemetry/status` — the latest tag snapshot (for the AI copilot),
+/// patched with the current config setpoints so a status read right after a
+/// set_speed/set_dwell reflects the change without waiting for the next tick.
+pub async fn status(State(state): State<AppState>) -> impl IntoResponse {
+    let s = state.latest.lock().unwrap().clone();
+    let mut value: serde_json::Value = serde_json::from_str(&s).unwrap_or_else(|_| json!({}));
+    let (speed, dwell, running) = {
+        let c = state.ctrl.lock().unwrap();
+        (c.speed, c.dwell, c.running)
+    };
+    if let Some(tags) = value.get_mut("tags").and_then(|t| t.as_object_mut()) {
+        tags.insert("conveyor.speed".into(), json!(speed));
+        tags.insert("station.dwell".into(), json!(dwell));
+        tags.insert("conveyor.enabled".into(), json!(running));
+    }
+    Json(value)
 }

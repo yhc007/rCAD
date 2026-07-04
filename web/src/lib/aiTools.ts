@@ -215,6 +215,31 @@ export const AI_TOOLS: ToolDef[] = [
     input_schema: { type: 'object', properties: {} },
   },
   {
+    name: 'line_status',
+    description:
+      'Read the live process line: flow state, whether the belt is running, the part position, belt speed, station dwell, throughput count, and which station is busy.',
+    input_schema: { type: 'object', properties: {} },
+  },
+  {
+    name: 'line_control',
+    description: 'Supervisory control of the process line: start, stop, or reset the conveyor.',
+    input_schema: {
+      type: 'object',
+      properties: { command: { type: 'string', enum: ['start', 'stop', 'reset'] } },
+      required: ['command'],
+    },
+  },
+  {
+    name: 'set_dwell',
+    description: 'Set how long each station processes a part, in seconds.',
+    input_schema: { type: 'object', properties: { seconds: num }, required: ['seconds'] },
+  },
+  {
+    name: 'set_speed',
+    description: 'Set the conveyor belt speed in mm/s.',
+    input_schema: { type: 'object', properties: { mm_per_s: num }, required: ['mm_per_s'] },
+  },
+  {
     name: 'select_feature',
     description: 'Select a part (or pass null to clear selection) so the user sees what you are working on.',
     input_schema: {
@@ -622,6 +647,50 @@ export async function executeTool(name: string, input: Input): Promise<unknown> 
         const id = String(input.id);
         await cad.deleteFeature(id);
         return { deleted: id };
+      }
+
+      case 'line_status': {
+        const res = await fetch('/api/telemetry/status');
+        const d = await res.json();
+        const t = d.tags ?? {};
+        return {
+          flow: d.flow,
+          enabled: t['conveyor.enabled'], // operator on/off
+          belt_moving: t['conveyor.running'],
+          position: t['conveyor.position'],
+          speed: t['conveyor.speed'],
+          dwell: t['station.dwell'],
+          throughput: t['throughput.count'],
+          station1_busy: t['station1.busy'],
+          station2_busy: t['station2.busy'],
+        };
+      }
+
+      case 'line_control': {
+        const res = await fetch('/api/telemetry/control', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ command: String(input.command) }),
+        });
+        return await res.json();
+      }
+
+      case 'set_dwell': {
+        const res = await fetch('/api/telemetry/control', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ command: 'config', dwell: Math.max(0, Number(input.seconds) || 0) }),
+        });
+        return await res.json();
+      }
+
+      case 'set_speed': {
+        const res = await fetch('/api/telemetry/control', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ command: 'config', speed: Math.max(0, Number(input.mm_per_s) || 0) }),
+        });
+        return await res.json();
       }
 
       case 'select_feature': {
