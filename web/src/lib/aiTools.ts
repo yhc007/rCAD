@@ -246,6 +246,33 @@ export const AI_TOOLS: ToolDef[] = [
     input_schema: { type: 'object', properties: { percent: num }, required: ['percent'] },
   },
   {
+    name: 'add_rule',
+    description:
+      'Add an automation rule: when a live tag crosses a value, run an action. Control actions (stop/start/set_speed/set_dwell/set_fail_rate) fire once per crossing; alarm is shown while the condition holds. Useful tags: reject.count, throughput.count, conveyor.speed, conveyor.running, inspection.fail. Example: reject.count > 5 → stop with an alarm.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        when_tag: { type: 'string', description: 'tag name, e.g. reject.count' },
+        op: { type: 'string', enum: ['>', '<', '>=', '<=', '==', '!='] },
+        value: num,
+        action: { type: 'string', enum: ['stop', 'start', 'set_speed', 'set_dwell', 'set_fail_rate', 'alarm'] },
+        arg: { type: 'number', description: 'argument for set_* actions' },
+        message: { type: 'string', description: 'alarm message' },
+      },
+      required: ['when_tag', 'op', 'value', 'action'],
+    },
+  },
+  {
+    name: 'list_rules',
+    description: 'List the current automation rules.',
+    input_schema: { type: 'object', properties: {} },
+  },
+  {
+    name: 'clear_rules',
+    description: 'Remove all automation rules.',
+    input_schema: { type: 'object', properties: {} },
+  },
+  {
     name: 'select_feature',
     description: 'Select a part (or pass null to clear selection) so the user sees what you are working on.',
     input_schema: {
@@ -707,6 +734,36 @@ export async function executeTool(name: string, input: Input): Promise<unknown> 
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ command: 'config', fail_rate: Math.max(0, Math.min(100, Number(input.percent) || 0)) }),
+        });
+        return await res.json();
+      }
+
+      case 'add_rule': {
+        const rule = {
+          tag: String(input.when_tag),
+          op: String(input.op),
+          value: Number(input.value) || 0,
+          action: String(input.action),
+          arg: Number(input.arg) || 0,
+          message: String(input.message ?? ''),
+        };
+        const res = await fetch('/api/telemetry/rules', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ rules: [rule], mode: 'append' }),
+        });
+        return { added: rule, ...(await res.json()) };
+      }
+
+      case 'list_rules': {
+        return await (await fetch('/api/telemetry/rules')).json();
+      }
+
+      case 'clear_rules': {
+        const res = await fetch('/api/telemetry/rules', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ rules: [], mode: 'replace' }),
         });
         return await res.json();
       }

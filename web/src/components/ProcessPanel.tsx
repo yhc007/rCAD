@@ -128,6 +128,14 @@ export function ProcessPanel({ open, onClose }: { open: boolean; onClose: () => 
         </button>
       </div>
 
+      {/* Automation alarm (from a rule) */}
+      {snap?.tags['alarm.active'] === true && (
+        <div className="px-4 py-1.5 bg-red-600/25 border-b border-red-600/50 text-red-300 text-sm flex items-center gap-2">
+          <span className="animate-pulse">🚨</span>
+          ALARM — {String(snap.tags['alarm.message'] || 'condition met')}
+        </div>
+      )}
+
       <div className="flex flex-1 overflow-hidden">
         {/* Conveyor strip */}
         <div className="flex-1 p-4 flex flex-col justify-center">

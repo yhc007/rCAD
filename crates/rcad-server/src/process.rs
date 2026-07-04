@@ -18,9 +18,10 @@ use axum::{
 };
 use futures::{sink::SinkExt, stream::StreamExt};
 use rumqttc::{AsyncClient, Event, MqttOptions, Packet, QoS};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
+    collections::HashMap,
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -43,15 +44,49 @@ impl Default for Control {
     }
 }
 
+/// An authorable automation rule: when `tag op value` holds, run `action`.
+/// Actions stop/start/set_* fire once on the rising edge; `alarm` is level-held.
+#[derive(Clone, Deserialize, Serialize)]
+pub struct Rule {
+    pub tag: String,
+    pub op: String, // > < >= <= == !=
+    pub value: f64,
+    pub action: String, // stop | start | set_speed | set_dwell | set_fail_rate | alarm
+    #[serde(default)]
+    pub arg: f64,
+    #[serde(default)]
+    pub message: String,
+}
+
 /// Router state: telemetry bus + shared control + the latest snapshot (so the
 /// AI copilot can read line status over REST without an open WebSocket) +
-/// external tag overrides (real-hardware source injected over HTTP or MQTT).
+/// external tag overrides (real-hardware source injected over HTTP or MQTT) +
+/// authorable automation rules.
 #[derive(Clone)]
 pub struct AppState {
     pub tx: Tx,
     pub ctrl: Arc<Mutex<Control>>,
     pub latest: Arc<Mutex<String>>,
     pub overrides: Arc<Mutex<serde_json::Map<String, Value>>>,
+    pub rules: Arc<Mutex<Vec<Rule>>>,
+}
+
+/// Evaluate one rule's condition against the current tags.
+fn eval_cond(tags: &serde_json::Map<String, Value>, r: &Rule) -> bool {
+    let x = match tags.get(&r.tag) {
+        Some(v) => v.as_f64().or_else(|| v.as_bool().map(|b| if b { 1.0 } else { 0.0 })),
+        None => None,
+    };
+    let Some(x) = x else { return false };
+    match r.op.as_str() {
+        ">" => x > r.value,
+        "<" => x < r.value,
+        ">=" => x >= r.value,
+        "<=" => x <= r.value,
+        "==" => (x - r.value).abs() < 1e-9,
+        "!=" => (x - r.value).abs() >= 1e-9,
+        _ => false,
+    }
 }
 
 const LENGTH: f64 = 300.0; // conveyor length (mm)
@@ -80,6 +115,7 @@ pub fn spawn_sim(state: AppState) {
         let mut flow = Flow::Moving;
         let mut dwell_left = 0.0_f64;
         let mut processed = [false; 2]; // stations handled on this pass
+        let mut last_fired: HashMap<String, bool> = HashMap::new(); // rule edge state
         loop {
             interval.tick().await;
 
@@ -177,6 +213,45 @@ pub fn spawn_sim(state: AppState) {
                 }
                 if ov.is_empty() { "mock" } else { "external" }
             };
+
+            // Evaluate automation rules against the effective tags. Control
+            // actions fire once on the rising edge; alarms are held while true.
+            let mut alarm_active = false;
+            let mut alarm_msg = String::new();
+            {
+                let rules = state.rules.lock().unwrap();
+                for r in rules.iter() {
+                    let cond = eval_cond(&tags, r);
+                    let key = format!("{}|{}|{}|{}", r.tag, r.op, r.value, r.action);
+                    let was = *last_fired.get(&key).unwrap_or(&false);
+                    if r.action == "alarm" {
+                        if cond {
+                            alarm_active = true;
+                            if alarm_msg.is_empty() {
+                                alarm_msg = if r.message.is_empty() {
+                                    format!("{} {} {}", r.tag, r.op, r.value)
+                                } else {
+                                    r.message.clone()
+                                };
+                            }
+                        }
+                    } else if cond && !was {
+                        let mut c = state.ctrl.lock().unwrap();
+                        match r.action.as_str() {
+                            "stop" => c.running = false,
+                            "start" => c.running = true,
+                            "set_speed" => c.speed = r.arg.clamp(0.0, 300.0),
+                            "set_dwell" => c.dwell = r.arg.clamp(0.0, 30.0),
+                            "set_fail_rate" => c.fail_rate = r.arg.clamp(0.0, 100.0),
+                            _ => {}
+                        }
+                    }
+                    last_fired.insert(key, cond);
+                }
+            }
+            tags.insert("alarm.active".into(), json!(alarm_active));
+            tags.insert("alarm.message".into(), json!(alarm_msg));
+
             let snapshot = json!({
                 "time": (t * 10.0).round() / 10.0,
                 "layout": { "length": LENGTH, "stations": STATIONS },
@@ -288,6 +363,29 @@ pub async fn ingest(State(state): State<AppState>, Json(req): Json<IngestReq>) -
         }
     }
     Json(json!({ "ok": true, "overrides": ov.len() }))
+}
+
+#[derive(Deserialize)]
+pub struct RulesReq {
+    rules: Vec<Rule>,
+    #[serde(default)]
+    mode: String, // "append" to add; anything else replaces
+}
+
+/// `GET /api/telemetry/rules` — the current automation rules.
+pub async fn get_rules(State(state): State<AppState>) -> impl IntoResponse {
+    Json(json!({ "rules": *state.rules.lock().unwrap() }))
+}
+
+/// `POST /api/telemetry/rules` — replace (or append to) the automation rules.
+pub async fn set_rules(State(state): State<AppState>, Json(req): Json<RulesReq>) -> impl IntoResponse {
+    let mut rules = state.rules.lock().unwrap();
+    if req.mode == "append" {
+        rules.extend(req.rules);
+    } else {
+        *rules = req.rules;
+    }
+    Json(json!({ "ok": true, "count": rules.len() }))
 }
 
 /// Bridge the process twin to an MQTT broker when `MQTT_BROKER=host:port` is set:

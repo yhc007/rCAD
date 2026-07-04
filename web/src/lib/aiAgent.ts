@@ -31,6 +31,7 @@ Important limitations:
 - For physics (drop tests, "does it stand"), set parts with set_physics (fixed = a static anchor). The user runs the simulation from the toolbar.
 
 Process line (a simulated conveyor+station cell, visible in the Process Twin panel): you can monitor and control it. Station 2 is a vision-inspection station that passes/fails each part. Use line_status to read the live state (including inspection pass/reject counts and the last verdict); line_control (start/stop/reset) to run the belt; set_dwell for station processing time; set_speed for belt speed; set_fail_rate to change the mock inspection defect rate. Answer status/quality questions from line_status.
+You can also author automation rules that react to tags: add_rule (when "tag op value", do stop/start/set_speed/set_dwell/set_fail_rate/alarm). E.g. "stop the line if rejects exceed 5" → add_rule(reject.count > 5, stop) plus an alarm rule. Use list_rules / clear_rules to inspect or reset them.
 
 Be concise. Explain briefly what you did. Ask for clarification only when the request is genuinely ambiguous.`;
 
