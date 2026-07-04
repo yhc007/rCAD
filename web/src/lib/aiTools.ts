@@ -296,6 +296,11 @@ export const AI_TOOLS: ToolDef[] = [
               y: { type: 'number', description: 'lane: 0 main belt, -1 branch below' },
               dwell: { type: 'number', description: 'processing seconds (process/inspect)' },
               fail_rate: { type: 'number', description: 'inspect defect percent 0–100' },
+              verdict_tag: {
+                type: 'string',
+                description:
+                  'inspect only: route on this live external tag when present (e.g. "inspection.result" from the real vision camera), else the mock',
+              },
               label: { type: 'string' },
             },
             required: ['id', 'kind'],
@@ -833,6 +838,7 @@ export async function executeTool(name: string, input: Input): Promise<unknown> 
             y: o.y != null ? Number(o.y) : 0,
             ...(o.dwell != null ? { dwell: Number(o.dwell) } : {}),
             ...(o.fail_rate != null ? { fail_rate: Number(o.fail_rate) } : {}),
+            ...(o.verdict_tag != null ? { verdict_tag: String(o.verdict_tag) } : {}),
             ...(o.label != null ? { label: String(o.label) } : {}),
           };
         });

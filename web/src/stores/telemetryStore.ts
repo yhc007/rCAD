@@ -9,6 +9,7 @@ export interface FlowNode {
   kind: string; // source | process | inspect | sink
   pos: number;
   y?: number;
+  verdict_tag?: string | null; // inspect: routes on this external tag (e.g. vision)
   label?: string | null;
 }
 export interface FlowEdge {

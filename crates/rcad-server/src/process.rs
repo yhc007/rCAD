@@ -78,6 +78,9 @@ pub struct FlowNode {
     #[serde(default)]
     pub fail_rate: Option<f64>, // per-inspect defect rate (else the global fail_rate)
     #[serde(default)]
+    pub verdict_tag: Option<String>, // inspect: route on this external tag (e.g. the
+    // real vision verdict "inspection.result") when present; else fall back to the mock
+    #[serde(default)]
     pub label: Option<String>,
 }
 
@@ -113,6 +116,7 @@ fn node(id: &str, kind: &str, pos: f64, y: f64, label: &str) -> FlowNode {
         y,
         dwell: None,
         fail_rate: None,
+        verdict_tag: None,
         label: Some(label.into()),
     }
 }
@@ -124,11 +128,16 @@ fn edge(from: &str, to: &str, when: Option<&str>) -> FlowEdge {
 /// Node ids `station1`/`station2` are kept so the existing twin sensor bindings
 /// and per-station tags carry over unchanged.
 pub fn default_graph() -> FlowGraph {
+    // The inspect station routes on the live vision verdict when the OpenCV
+    // camera is feeding `inspection.result` (source:external); otherwise it
+    // falls back to the mock pass/fail. So a real camera controls the branch.
+    let mut inspect = node("station2", "inspect", 220.0, 0.0, "Inspect");
+    inspect.verdict_tag = Some("inspection.result".into());
     FlowGraph {
         nodes: vec![
             node("load", "source", 0.0, 0.0, "Load"),
             node("station1", "process", 100.0, 0.0, "Mill"),
-            node("station2", "inspect", 220.0, 0.0, "Inspect"),
+            inspect,
             node("pack", "sink", 320.0, 0.0, "Pack"),
             node("reject", "sink", 260.0, -1.0, "Reject"),
         ],
@@ -256,6 +265,25 @@ fn node_dwell(n: &FlowNode, global: f64) -> f64 {
     }
 }
 
+/// Interpret an external tag (e.g. the real vision verdict) as pass/fail.
+/// Accepts "PASS"/"FAIL"/"OK"/"NG"/bool; returns None if absent/unrecognized.
+fn ext_verdict(ext: &serde_json::Map<String, Value>, tag: &str) -> Option<bool> {
+    match ext.get(tag) {
+        Some(Value::String(s)) => {
+            let u = s.to_ascii_uppercase();
+            if u.contains("PASS") || u == "OK" || u == "TRUE" || u == "GOOD" {
+                Some(true)
+            } else if u.contains("FAIL") || u == "NG" || u == "FALSE" || u == "BAD" {
+                Some(false)
+            } else {
+                None
+            }
+        }
+        Some(Value::Bool(b)) => Some(*b),
+        _ => None,
+    }
+}
+
 /// Advance one part by `dt`. Returns true if the part has left the line (reached
 /// a sink or a dead end) and should be removed.
 #[allow(clippy::too_many_arguments)]
@@ -266,6 +294,7 @@ fn advance_part(
     speed: f64,
     dwell: f64,
     fail_rate: f64,
+    ext: &serde_json::Map<String, Value>,
     inspection_num: &mut u64,
     last_inspection: &mut Option<bool>,
     pass_count: &mut u64,
@@ -282,9 +311,14 @@ fn advance_part(
             }
             // Dwell finished: run the station's operation, then leave.
             if n.kind == "inspect" && !judged {
-                let fr = n.fail_rate.unwrap_or(fail_rate);
-                let h = (*inspection_num).wrapping_mul(2654435761) >> 8;
-                let pass = (h % 100) as f64 >= fr;
+                // Prefer a live external verdict (the real vision camera) when the
+                // node binds one and it is present; else fall back to the mock.
+                let external = n.verdict_tag.as_deref().and_then(|t| ext_verdict(ext, t));
+                let pass = external.unwrap_or_else(|| {
+                    let fr = n.fail_rate.unwrap_or(fail_rate);
+                    let h = (*inspection_num).wrapping_mul(2654435761) >> 8;
+                    (h % 100) as f64 >= fr
+                });
                 p.verdict = Some(pass);
                 *last_inspection = Some(pass);
                 *inspection_num += 1;
@@ -370,6 +404,9 @@ pub fn spawn_sim(state: AppState) {
             t += dt;
 
             let g = state.graph.lock().unwrap().clone();
+            // External tag overrides (a real gateway / the vision camera). Read
+            // once per tick: used both to route inspect nodes and to overlay tags.
+            let ext = state.overrides.lock().unwrap().clone();
 
             // Spawn a new part at the first source node on the spawn interval.
             spawn_timer += dt;
@@ -396,6 +433,7 @@ pub fn spawn_sim(state: AppState) {
                         speed,
                         dwell,
                         fail_rate,
+                        &ext,
                         &mut inspection_num,
                         &mut last_inspection,
                         &mut pass_count,
@@ -484,14 +522,21 @@ pub fn spawn_sim(state: AppState) {
                 );
             }
 
+            // Report whether any inspect station is currently routing on a live
+            // external verdict (the real vision camera) vs the mock.
+            let vision_routing = g.nodes.iter().any(|n| {
+                n.kind == "inspect"
+                    && n.verdict_tag.as_deref().map(|t| ext.contains_key(t)).unwrap_or(false)
+            });
+            tags.insert("inspection.routing".into(), json!(if vision_routing { "vision" } else { "mock" }));
+
             // Overlay any external tag values (a real sensor source overrides the
             // mock). If any exist, the twin is being driven from outside.
             let source = {
-                let ov = state.overrides.lock().unwrap();
-                for (k, v) in ov.iter() {
+                for (k, v) in ext.iter() {
                     tags.insert(k.clone(), v.clone());
                 }
-                if ov.is_empty() { "mock" } else { "external" }
+                if ext.is_empty() { "mock" } else { "external" }
             };
 
             // Evaluate automation rules against the effective tags. Control
