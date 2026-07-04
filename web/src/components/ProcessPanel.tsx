@@ -1,16 +1,17 @@
 import React from 'react';
-import { Activity, X } from 'lucide-react';
+import { Activity, X, Play, Pause, RotateCcw } from 'lucide-react';
 
 interface Snapshot {
   time: number;
+  flow: string;
   layout: { length: number; stations: number[] };
   tags: Record<string, number | boolean>;
 }
 
-// Live process digital-twin: streams tag telemetry from the mock conveyor sim
-// (server /api/telemetry/ws) and shows a 2D belt + a tag inspector. The tag
-// abstraction means this same panel will work once the source is a real MQTT /
-// OPC UA gateway.
+// Live process digital-twin: streams tag telemetry from the mock conveyor flow
+// (server /api/telemetry/ws), visualises the belt + flow state, and lets the
+// operator start/stop/reset the line (supervisory control → /api/telemetry/
+// control). Tag-keyed, so the source can later be a real MQTT / OPC UA gateway.
 export function ProcessPanel({ open, onClose }: { open: boolean; onClose: () => void }) {
   const [snap, setSnap] = React.useState<Snapshot | null>(null);
   const [connected, setConnected] = React.useState(false);
@@ -20,7 +21,6 @@ export function ProcessPanel({ open, onClose }: { open: boolean; onClose: () => 
     let ws: WebSocket | null = null;
     let retry: ReturnType<typeof setTimeout> | undefined;
     let closed = false;
-
     const connect = () => {
       const proto = location.protocol === 'https:' ? 'wss' : 'ws';
       ws = new WebSocket(`${proto}://${location.host}/api/telemetry/ws`);
@@ -29,12 +29,12 @@ export function ProcessPanel({ open, onClose }: { open: boolean; onClose: () => 
         try {
           setSnap(JSON.parse(e.data));
         } catch {
-          /* ignore malformed frame */
+          /* ignore */
         }
       };
       ws.onclose = () => {
         setConnected(false);
-        if (!closed) retry = setTimeout(connect, 1000); // reconnect
+        if (!closed) retry = setTimeout(connect, 1000);
       };
       ws.onerror = () => ws?.close();
     };
@@ -46,11 +46,21 @@ export function ProcessPanel({ open, onClose }: { open: boolean; onClose: () => 
     };
   }, [open]);
 
+  const control = (command: string) =>
+    fetch('/api/telemetry/control', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ command }),
+    }).catch(() => {});
+
   if (!open) return null;
 
   const layout = snap?.layout ?? { length: 300, stations: [100, 220] };
   const pos = Number(snap?.tags['conveyor.position'] ?? 0);
-  const stationTrip = (i: number) => !!snap?.tags[`station${i + 1}.proximity`];
+  const running = !!snap?.tags['conveyor.running'];
+  const near = (i: number) => !!snap?.tags[`station${i + 1}.proximity`];
+  const busy = (i: number) => !!snap?.tags[`station${i + 1}.busy`];
+  const anyBusy = busy(0) || busy(1);
 
   return (
     <div className="absolute bottom-0 left-0 right-0 z-30 h-56 flex flex-col bg-cad-panel border-t border-cad-border shadow-2xl">
@@ -61,7 +71,21 @@ export function ProcessPanel({ open, onClose }: { open: boolean; onClose: () => 
           <span className={`w-2 h-2 rounded-full ${connected ? 'bg-green-500' : 'bg-red-500'}`} />
           {connected ? 'live' : 'connecting…'}
         </span>
-        <span className="text-xs text-cad-text-muted ml-2">t={snap?.time ?? 0}s</span>
+        {/* flow state */}
+        <span
+          className={`ml-3 px-2 py-0.5 rounded text-xs font-mono ${
+            anyBusy ? 'bg-yellow-500/20 text-yellow-400' : running ? 'bg-green-500/15 text-green-400' : 'bg-cad-bg text-cad-text-muted'
+          }`}
+        >
+          {snap?.flow ?? '—'}
+        </span>
+        {/* controls */}
+        <div className="flex items-center gap-1 ml-3">
+          <CtrlBtn title="Start" onClick={() => control('start')}><Play size={13} /></CtrlBtn>
+          <CtrlBtn title="Stop" onClick={() => control('stop')}><Pause size={13} /></CtrlBtn>
+          <CtrlBtn title="Reset" onClick={() => control('reset')}><RotateCcw size={13} /></CtrlBtn>
+        </div>
+        <span className="text-xs text-cad-text-muted ml-3">t={snap?.time ?? 0}s</span>
         <button className="ml-auto text-cad-text-muted hover:text-cad-text" onClick={onClose} title="Close">
           <X size={16} />
         </button>
@@ -70,20 +94,26 @@ export function ProcessPanel({ open, onClose }: { open: boolean; onClose: () => 
       <div className="flex flex-1 overflow-hidden">
         {/* Conveyor strip */}
         <div className="flex-1 p-4 flex flex-col justify-center">
-          <div className="text-xs text-cad-text-muted mb-2">Conveyor (mm)</div>
+          <div className="text-xs text-cad-text-muted mb-2">
+            Conveyor (mm) · belt {running ? 'running' : 'stopped'}
+          </div>
           <svg viewBox={`0 0 ${layout.length} 100`} preserveAspectRatio="none" className="w-full h-24">
-            {/* belt */}
             <rect x={0} y={38} width={layout.length} height={24} fill="#2a2a33" stroke="#444" strokeWidth={0.5} />
-            {/* stations + proximity sensors */}
             {layout.stations.map((s, i) => (
               <g key={i}>
                 <line x1={s} y1={20} x2={s} y2={80} stroke="#555" strokeWidth={1} strokeDasharray="3 3" />
-                <circle cx={s} cy={18} r={6} fill={stationTrip(i) ? '#22c55e' : '#444'} stroke="#666" strokeWidth={0.5} />
+                <circle
+                  cx={s}
+                  cy={18}
+                  r={6}
+                  fill={busy(i) ? '#eab308' : near(i) ? '#22c55e' : '#444'}
+                  stroke="#666"
+                  strokeWidth={0.5}
+                />
                 <text x={s} y={95} fontSize={7} fill="#888" textAnchor="middle">S{i + 1}</text>
               </g>
             ))}
-            {/* part */}
-            <rect x={pos - 9} y={34} width={18} height={32} rx={2} fill="#e08a3c" />
+            <rect x={pos - 9} y={34} width={18} height={32} rx={2} fill={anyBusy ? '#eab308' : '#e08a3c'} />
           </svg>
         </div>
 
@@ -110,5 +140,17 @@ export function ProcessPanel({ open, onClose }: { open: boolean; onClose: () => 
         </div>
       </div>
     </div>
+  );
+}
+
+function CtrlBtn({ title, onClick, children }: { title: string; onClick: () => void; children: React.ReactNode }) {
+  return (
+    <button
+      title={title}
+      onClick={onClick}
+      className="p-1.5 rounded bg-cad-bg border border-cad-border text-cad-text hover:border-cad-accent"
+    >
+      {children}
+    </button>
   );
 }

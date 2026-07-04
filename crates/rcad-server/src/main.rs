@@ -56,15 +56,19 @@ pub fn create_router() -> Router {
 
     // Telemetry bus + mock process simulation (digital-twin stage).
     let (tx, _rx) = tokio::sync::broadcast::channel::<String>(64);
-    process::spawn_sim(tx.clone());
+    let state = process::AppState {
+        tx,
+        ctrl: std::sync::Arc::new(std::sync::Mutex::new(process::Control::default())),
+    };
+    process::spawn_sim(state.clone());
 
     Router::new()
         // Health check
         .route("/health", get(health_check))
         // API routes
         .nest("/api", api_routes())
-        // Provide the telemetry bus to the WebSocket handler, then erase state.
-        .with_state(tx)
+        // Provide the telemetry bus + control to the handlers, then erase state.
+        .with_state(state)
         // Allow large uploads — STEP assemblies routinely run tens of MB, well
         // past Axum's 2 MB default (which silently rejected big imports).
         .layer(DefaultBodyLimit::max(512 * 1024 * 1024))
@@ -73,11 +77,13 @@ pub fn create_router() -> Router {
         .layer(cors)
 }
 
-/// API routes (state = the telemetry broadcast bus; most handlers ignore it).
-fn api_routes() -> Router<process::Tx> {
+/// API routes (state = telemetry bus + control; most handlers ignore it).
+fn api_routes() -> Router<process::AppState> {
     Router::new()
         // Process digital-twin telemetry stream (mock sim → tags over WebSocket)
         .route("/telemetry/ws", get(process::telemetry_ws))
+        // Supervisory line control (start/stop/reset)
+        .route("/telemetry/control", post(process::control))
         // AI copilot (proxies the GLM chat API; key stays server-side)
         .route("/ai/chat", post(api::ai::chat))
         // Tripo text-to-3D generation → merged mesh
