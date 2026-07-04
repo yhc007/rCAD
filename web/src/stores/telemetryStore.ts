@@ -4,11 +4,33 @@ import { create } from 'zustand';
 // latest snapshot is read by both the Process Twin panel (2D + control) and the
 // 3D Canvas (which binds the part's position to the conveyor tag).
 
+export interface FlowNode {
+  id: string;
+  kind: string; // source | process | inspect | sink
+  pos: number;
+  y?: number;
+  label?: string | null;
+}
+export interface FlowEdge {
+  from: string;
+  to: string;
+  when?: string | null; // 'pass' | 'fail' | null
+}
+export interface FlowPart {
+  id: number;
+  x: number;
+  y?: number;
+  node?: string | null;
+  verdict?: boolean | null;
+}
+
 export interface Snapshot {
   time: number;
   flow: string;
   source?: string; // 'mock' | 'external' — the tag source (mock sim vs real gateway)
   layout: { length: number; stations: number[] };
+  graph?: { nodes: FlowNode[]; edges: FlowEdge[] }; // authorable multi-step process
+  parts?: FlowPart[]; // live work-pieces flowing the graph
   tags: Record<string, number | boolean | string>;
 }
 

@@ -1,6 +1,6 @@
 import React from 'react';
 import { Activity, X, Play, Pause, RotateCcw, Boxes } from 'lucide-react';
-import { useTelemetryStore } from '../stores/telemetryStore';
+import { useTelemetryStore, type FlowNode, type FlowEdge, type FlowPart } from '../stores/telemetryStore';
 import { useCAD } from '../hooks/useCAD';
 
 // Live process digital-twin: streams tag telemetry from the mock conveyor flow
@@ -140,11 +140,13 @@ export function ProcessPanel({ open, onClose }: { open: boolean; onClose: () => 
   if (!open) return null;
 
   const layout = snap?.layout ?? { length: 300, stations: [100, 220] };
+  const graph = snap?.graph;
+  const parts = snap?.parts ?? [];
   const pos = Number(snap?.tags['conveyor.position'] ?? 0);
   const running = !!snap?.tags['conveyor.running'];
   const near = (i: number) => !!snap?.tags[`station${i + 1}.proximity`];
   const busy = (i: number) => !!snap?.tags[`station${i + 1}.busy`];
-  const anyBusy = busy(0) || busy(1);
+  const anyBusy = graph ? parts.some((p) => !!p.node) : busy(0) || busy(1);
   const result = snap?.tags['inspection.result'];
   const partFill = result === 'PASS' ? '#22c55e' : result === 'FAIL' ? '#ef4444' : anyBusy ? '#eab308' : '#e08a3c';
 
@@ -216,29 +218,29 @@ export function ProcessPanel({ open, onClose }: { open: boolean; onClose: () => 
       )}
 
       <div className="flex flex-1 overflow-hidden">
-        {/* Conveyor strip */}
-        <div className="flex-1 p-4 flex flex-col justify-center">
+        {/* Process flow graph (multi-step) — falls back to the single belt */}
+        <div className="flex-1 p-4 flex flex-col justify-center min-w-0">
           <div className="text-xs text-cad-text-muted mb-2">
-            Conveyor (mm) · belt {running ? 'running' : 'stopped'}
+            {graph
+              ? `Flow graph · ${graph.nodes.length} steps · ${parts.length} WIP`
+              : 'Conveyor (mm)'}{' '}
+            · belt {running ? 'running' : 'stopped'}
           </div>
-          <svg viewBox={`0 0 ${layout.length} 100`} preserveAspectRatio="none" className="w-full h-24">
-            <rect x={0} y={38} width={layout.length} height={24} fill="#2a2a33" stroke="#444" strokeWidth={0.5} />
-            {layout.stations.map((s, i) => (
-              <g key={i}>
-                <line x1={s} y1={20} x2={s} y2={80} stroke="#555" strokeWidth={1} strokeDasharray="3 3" />
-                <circle
-                  cx={s}
-                  cy={18}
-                  r={6}
-                  fill={busy(i) ? '#eab308' : near(i) ? '#22c55e' : '#444'}
-                  stroke="#666"
-                  strokeWidth={0.5}
-                />
-                <text x={s} y={95} fontSize={7} fill="#888" textAnchor="middle">S{i + 1}</text>
-              </g>
-            ))}
-            <rect x={pos - 9} y={34} width={18} height={32} rx={2} fill={partFill} />
-          </svg>
+          {graph ? (
+            <FlowGraphView graph={graph} parts={parts} tags={snap!.tags} />
+          ) : (
+            <svg viewBox={`0 0 ${layout.length} 100`} preserveAspectRatio="none" className="w-full h-24">
+              <rect x={0} y={38} width={layout.length} height={24} fill="#2a2a33" stroke="#444" strokeWidth={0.5} />
+              {layout.stations.map((s, i) => (
+                <g key={i}>
+                  <line x1={s} y1={20} x2={s} y2={80} stroke="#555" strokeWidth={1} strokeDasharray="3 3" />
+                  <circle cx={s} cy={18} r={6} fill={busy(i) ? '#eab308' : near(i) ? '#22c55e' : '#444'} stroke="#666" strokeWidth={0.5} />
+                  <text x={s} y={95} fontSize={7} fill="#888" textAnchor="middle">S{i + 1}</text>
+                </g>
+              ))}
+              <rect x={pos - 9} y={34} width={18} height={32} rx={2} fill={partFill} />
+            </svg>
+          )}
         </div>
 
         {/* Inspection camera (real webcam feed) */}
@@ -301,6 +303,94 @@ export function ProcessPanel({ open, onClose }: { open: boolean; onClose: () => 
         </div>
       </div>
     </div>
+  );
+}
+
+// Renders an arbitrary process flow graph: nodes (source/process/inspect/sink)
+// laid out by their mm position + lane, transitions as arrows (green=pass,
+// red=fail), and live parts as dots coloured by their inspection verdict.
+const NODE_FILL: Record<string, string> = {
+  source: '#3b82f6',
+  process: '#475569',
+  inspect: '#8b5cf6',
+  sink: '#6b7280',
+};
+function FlowGraphView({
+  graph,
+  parts,
+  tags,
+}: {
+  graph: { nodes: FlowNode[]; edges: FlowEdge[] };
+  parts: FlowPart[];
+  tags: Record<string, number | boolean | string>;
+}) {
+  const byId = React.useMemo(() => {
+    const m: Record<string, FlowNode> = {};
+    for (const n of graph.nodes) m[n.id] = n;
+    return m;
+  }, [graph]);
+  const length = Math.max(60, ...graph.nodes.map((n) => n.pos));
+  const laneY = (y?: number) => 44 - (y ?? 0) * 30; // y=0 belt line; negative = below
+  const partFill = (v?: boolean | null) => (v === true ? '#22c55e' : v === false ? '#ef4444' : '#e0a83c');
+
+  return (
+    <svg viewBox={`-14 0 ${length + 40} 100`} preserveAspectRatio="none" className="w-full h-32">
+      {/* main belt line */}
+      <rect x={0} y={laneY(0) - 3} width={length} height={6} fill="#2a2a33" stroke="#444" strokeWidth={0.4} />
+      {/* transitions */}
+      {graph.edges.map((e, i) => {
+        const a = byId[e.from];
+        const b = byId[e.to];
+        if (!a || !b) return null;
+        const stroke = e.when === 'pass' ? '#22c55e' : e.when === 'fail' ? '#ef4444' : '#5b6472';
+        const mx = (a.pos + b.pos) / 2;
+        const my = (laneY(a.y) + laneY(b.y)) / 2;
+        return (
+          <g key={i}>
+            <line x1={a.pos} y1={laneY(a.y)} x2={b.pos} y2={laneY(b.y)} stroke={stroke} strokeWidth={1} opacity={0.7} markerEnd="url(#arrow)" />
+            {e.when && (
+              <text x={mx} y={my - 2} fontSize={5.5} fill={stroke} textAnchor="middle">
+                {e.when}
+              </text>
+            )}
+          </g>
+        );
+      })}
+      <defs>
+        <marker id="arrow" markerWidth={6} markerHeight={6} refX={5} refY={2} orient="auto">
+          <path d="M0,0 L4,2 L0,4 Z" fill="#6b7280" />
+        </marker>
+      </defs>
+      {/* nodes */}
+      {graph.nodes.map((n) => {
+        const busy = tags[`node.${n.id}.busy`] === true;
+        const count = tags[`node.${n.id}.count`];
+        return (
+          <g key={n.id}>
+            <circle
+              cx={n.pos}
+              cy={laneY(n.y)}
+              r={7}
+              fill={NODE_FILL[n.kind] ?? '#475569'}
+              stroke={busy ? '#eab308' : '#20242c'}
+              strokeWidth={busy ? 2 : 1}
+            />
+            <text x={n.pos} y={laneY(n.y) - 10} fontSize={5.5} fill="#cbd5e1" textAnchor="middle">
+              {n.label ?? n.id}
+            </text>
+            {count != null && (
+              <text x={n.pos} y={laneY(n.y) + 1.8} fontSize={5} fill="#0b0e14" textAnchor="middle" fontWeight="bold">
+                {String(count)}
+              </text>
+            )}
+          </g>
+        );
+      })}
+      {/* live parts */}
+      {parts.map((p) => (
+        <circle key={p.id} cx={p.x} cy={laneY(p.y) + 0} r={3.6} fill={partFill(p.verdict)} stroke="#0b0e14" strokeWidth={0.6} />
+      ))}
+    </svg>
   );
 }
 
