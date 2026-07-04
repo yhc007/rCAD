@@ -60,8 +60,10 @@ pub fn create_router() -> Router {
         tx,
         ctrl: std::sync::Arc::new(std::sync::Mutex::new(process::Control::default())),
         latest: std::sync::Arc::new(std::sync::Mutex::new(String::from("{}"))),
+        overrides: std::sync::Arc::new(std::sync::Mutex::new(serde_json::Map::new())),
     };
     process::spawn_sim(state.clone());
+    process::spawn_mqtt(state.clone()); // real-hardware bridge when MQTT_BROKER is set
 
     Router::new()
         // Health check
@@ -86,6 +88,8 @@ fn api_routes() -> Router<process::AppState> {
         // Supervisory line control (start/stop/reset/config) + status
         .route("/telemetry/control", post(process::control))
         .route("/telemetry/status", get(process::status))
+        // External tag ingress (real-hardware source over HTTP; MQTT feeds the same path)
+        .route("/telemetry/ingest", post(process::ingest))
         // AI copilot (proxies the GLM chat API; key stays server-side)
         .route("/ai/chat", post(api::ai::chat))
         // Tripo text-to-3D generation → merged mesh

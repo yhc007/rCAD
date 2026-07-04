@@ -7,6 +7,7 @@ import { create } from 'zustand';
 export interface Snapshot {
   time: number;
   flow: string;
+  source?: string; // 'mock' | 'external' — the tag source (mock sim vs real gateway)
   layout: { length: number; stations: number[] };
   tags: Record<string, number | boolean | string>;
 }

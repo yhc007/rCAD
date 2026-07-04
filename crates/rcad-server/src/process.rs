@@ -17,8 +17,9 @@ use axum::{
     Json,
 };
 use futures::{sink::SinkExt, stream::StreamExt};
+use rumqttc::{AsyncClient, Event, MqttOptions, Packet, QoS};
 use serde::Deserialize;
-use serde_json::json;
+use serde_json::{json, Value};
 use std::{
     sync::{Arc, Mutex},
     time::Duration,
@@ -43,12 +44,14 @@ impl Default for Control {
 }
 
 /// Router state: telemetry bus + shared control + the latest snapshot (so the
-/// AI copilot can read line status over REST without an open WebSocket).
+/// AI copilot can read line status over REST without an open WebSocket) +
+/// external tag overrides (real-hardware source injected over HTTP or MQTT).
 #[derive(Clone)]
 pub struct AppState {
     pub tx: Tx,
     pub ctrl: Arc<Mutex<Control>>,
     pub latest: Arc<Mutex<String>>,
+    pub overrides: Arc<Mutex<serde_json::Map<String, Value>>>,
 }
 
 const LENGTH: f64 = 300.0; // conveyor length (mm)
@@ -151,25 +154,35 @@ pub fn spawn_sim(state: AppState) {
                 None => "—",
             };
             let near = |s: f64| (pos - s).abs() <= PROXIMITY;
+            let mut tags = serde_json::Map::new();
+            tags.insert("conveyor.speed".into(), json!(speed));
+            tags.insert("conveyor.position".into(), json!((pos * 10.0).round() / 10.0));
+            tags.insert("conveyor.running".into(), json!(conveyor_running));
+            tags.insert("station1.proximity".into(), json!(near(STATIONS[0])));
+            tags.insert("station2.proximity".into(), json!(near(STATIONS[1])));
+            tags.insert("station1.busy".into(), json!(busy(0)));
+            tags.insert("station2.busy".into(), json!(busy(1)));
+            tags.insert("dwell.remaining".into(), json!((dwell_left * 10.0).round() / 10.0));
+            tags.insert("inspection.result".into(), json!(inspection));
+            tags.insert("inspection.pass".into(), json!(pass_count));
+            tags.insert("inspection.fail".into(), json!(fail_count));
+            tags.insert("throughput.count".into(), json!(pass_count));
+            tags.insert("reject.count".into(), json!(fail_count));
+            // Overlay any external tag values (a real sensor source overrides the
+            // mock). If any exist, the twin is being driven from outside.
+            let source = {
+                let ov = state.overrides.lock().unwrap();
+                for (k, v) in ov.iter() {
+                    tags.insert(k.clone(), v.clone());
+                }
+                if ov.is_empty() { "mock" } else { "external" }
+            };
             let snapshot = json!({
                 "time": (t * 10.0).round() / 10.0,
                 "layout": { "length": LENGTH, "stations": STATIONS },
                 "flow": state_str,
-                "tags": {
-                    "conveyor.speed": speed,
-                    "conveyor.position": (pos * 10.0).round() / 10.0,
-                    "conveyor.running": conveyor_running,
-                    "station1.proximity": near(STATIONS[0]),
-                    "station2.proximity": near(STATIONS[1]),
-                    "station1.busy": busy(0),
-                    "station2.busy": busy(1),
-                    "dwell.remaining": (dwell_left * 10.0).round() / 10.0,
-                    "inspection.result": inspection,
-                    "inspection.pass": pass_count,
-                    "inspection.fail": fail_count,
-                    "throughput.count": pass_count,
-                    "reject.count": fail_count,
-                }
+                "source": source,
+                "tags": tags,
             });
             let msg = snapshot.to_string();
             *state.latest.lock().unwrap() = msg.clone();
@@ -254,4 +267,96 @@ pub async fn status(State(state): State<AppState>) -> impl IntoResponse {
         tags.insert("inspection.fail_rate".into(), json!(fail_rate));
     }
     Json(value)
+}
+
+#[derive(Deserialize)]
+pub struct IngestReq {
+    tags: serde_json::Map<String, Value>,
+}
+
+/// `POST /api/telemetry/ingest` — an external source (a real-hardware gateway)
+/// pushes tag values that overlay the mock. A null value clears an override.
+/// This is the same path the MQTT bridge feeds, proving the twin is
+/// source-agnostic.
+pub async fn ingest(State(state): State<AppState>, Json(req): Json<IngestReq>) -> impl IntoResponse {
+    let mut ov = state.overrides.lock().unwrap();
+    for (k, v) in req.tags {
+        if v.is_null() {
+            ov.remove(&k);
+        } else {
+            ov.insert(k, v);
+        }
+    }
+    Json(json!({ "ok": true, "overrides": ov.len() }))
+}
+
+/// Bridge the process twin to an MQTT broker when `MQTT_BROKER=host:port` is set:
+/// publish each tag snapshot to `rcad/telemetry` and ingest external tag values
+/// from `rcad/tags/in`. The twin/flow/AI are all tag-keyed, so nothing else
+/// changes when the source becomes real hardware.
+pub fn spawn_mqtt(state: AppState) {
+    let broker = match std::env::var("MQTT_BROKER") {
+        Ok(b) if !b.trim().is_empty() => b,
+        _ => {
+            tracing::info!("MQTT bridge disabled (set MQTT_BROKER=host:port to enable)");
+            return;
+        }
+    };
+    let (host, port) = match broker.rsplit_once(':') {
+        Some((h, p)) => (h.to_string(), p.parse::<u16>().unwrap_or(1883)),
+        None => (broker.clone(), 1883),
+    };
+    tracing::info!("MQTT bridge → {host}:{port}");
+
+    tokio::spawn(async move {
+        let mut opts = MqttOptions::new("rcad-server", host, port);
+        opts.set_keep_alive(Duration::from_secs(5));
+        let (client, mut eventloop) = AsyncClient::new(opts, 64);
+
+        // Egress: republish every telemetry snapshot to the broker. Skip lag
+        // (which happens while disconnected) instead of exiting the task.
+        let mut rx = state.tx.subscribe();
+        let pub_client = client.clone();
+        tokio::spawn(async move {
+            loop {
+                match rx.recv().await {
+                    Ok(msg) => {
+                        let _ = pub_client
+                            .publish("rcad/telemetry", QoS::AtMostOnce, false, msg)
+                            .await;
+                    }
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        });
+
+        // Ingress: external tag values → overrides. Re-subscribe on every
+        // (re)connect so it survives broker restarts.
+        loop {
+            match eventloop.poll().await {
+                Ok(Event::Incoming(Packet::ConnAck(_))) => {
+                    let _ = client.subscribe("rcad/tags/in", QoS::AtMostOnce).await;
+                    tracing::info!("MQTT connected");
+                }
+                Ok(Event::Incoming(Packet::Publish(p))) if p.topic == "rcad/tags/in" => {
+                    if let Ok(map) = serde_json::from_slice::<serde_json::Map<String, Value>>(&p.payload) {
+                        let mut ov = state.overrides.lock().unwrap();
+                        for (k, v) in map {
+                            if v.is_null() {
+                                ov.remove(&k);
+                            } else {
+                                ov.insert(k, v);
+                            }
+                        }
+                    }
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::warn!("MQTT eventloop error: {e}; retrying");
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                }
+            }
+        }
+    });
 }

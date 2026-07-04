@@ -78,6 +78,17 @@ export function ProcessPanel({ open, onClose }: { open: boolean; onClose: () => 
           <span className={`w-2 h-2 rounded-full ${connected ? 'bg-green-500' : 'bg-red-500'}`} />
           {connected ? 'live' : 'connecting…'}
         </span>
+        {/* tag source: mock sim vs an external gateway (MQTT/HTTP) */}
+        {snap?.source && (
+          <span
+            className={`text-xs font-mono px-1.5 py-0.5 rounded ${
+              snap.source === 'external' ? 'bg-cad-accent/20 text-cad-accent' : 'bg-cad-bg text-cad-text-muted'
+            }`}
+            title="Telemetry source"
+          >
+            src:{snap.source}
+          </span>
+        )}
         {/* flow state */}
         <span
           className={`ml-3 px-2 py-0.5 rounded text-xs font-mono ${
