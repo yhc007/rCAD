@@ -17,13 +17,44 @@ export function ProcessPanel({ open, onClose }: { open: boolean; onClose: () => 
   const { cad } = useCAD();
   const [building, setBuilding] = React.useState(false);
 
-  // Real camera feed (inspection camera): the browser webcam via getUserMedia.
+  // Inspection camera — two sources: the browser webcam (getUserMedia) or an
+  // industrial RTSP/MJPEG camera the vision service opens server-side (the
+  // browser can't play RTSP, so we preview it as MJPEG via /vision/stream).
   const videoRef = React.useRef<HTMLVideoElement>(null);
   const streamRef = React.useRef<MediaStream | null>(null);
+  const [camMode, setCamMode] = React.useState<'webcam' | 'url'>('webcam');
+  const [camUrl, setCamUrl] = React.useState('');
   const [camOn, setCamOn] = React.useState(false);
   const [camErr, setCamErr] = React.useState<string | null>(null);
   const [vision, setVision] = React.useState<{ result: string; defect: number } | null>(null);
+  const disconnectSource = () =>
+    fetch('/vision/camera', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url: null }),
+    }).catch(() => {});
   const startCam = async () => {
+    setCamErr(null);
+    if (camMode === 'url') {
+      if (!camUrl.trim()) {
+        setCamErr('enter an RTSP/MJPEG URL');
+        return;
+      }
+      try {
+        const d = await (
+          await fetch('/vision/camera', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ url: camUrl.trim() }),
+          })
+        ).json();
+        if (!d.ok) throw new Error('camera rejected');
+        setCamOn(true);
+      } catch (e) {
+        setCamErr(e instanceof Error ? e.message : 'vision service unavailable');
+      }
+      return;
+    }
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
       streamRef.current = stream;
@@ -32,7 +63,6 @@ export function ProcessPanel({ open, onClose }: { open: boolean; onClose: () => 
         await videoRef.current.play().catch(() => {});
       }
       setCamOn(true);
-      setCamErr(null);
     } catch (e) {
       setCamErr(e instanceof Error ? e.message : 'camera unavailable');
     }
@@ -40,9 +70,17 @@ export function ProcessPanel({ open, onClose }: { open: boolean; onClose: () => 
   const stopCam = () => {
     streamRef.current?.getTracks().forEach((t) => t.stop());
     streamRef.current = null;
+    if (camMode === 'url') disconnectSource();
     setCamOn(false);
   };
-  React.useEffect(() => () => stopCam(), []); // stop the camera on unmount
+  // Stop whichever source is active on unmount (webcam tracks + server camera).
+  React.useEffect(
+    () => () => {
+      streamRef.current?.getTracks().forEach((t) => t.stop());
+      disconnectSource();
+    },
+    [],
+  );
 
   // While the camera is on, grab a frame every ~1.5s, send it to the OpenCV
   // vision service for a real PASS/FAIL, and feed that verdict back into the
@@ -57,23 +95,29 @@ export function ProcessPanel({ open, onClose }: { open: boolean; onClose: () => 
         body: JSON.stringify({ tags }),
       }).catch(() => {});
     const inspect = async () => {
-      const v = videoRef.current;
-      if (!v || !v.videoWidth) return;
-      const cvs = document.createElement('canvas');
-      cvs.width = v.videoWidth;
-      cvs.height = v.videoHeight;
-      const ctx = cvs.getContext('2d');
-      if (!ctx) return;
-      ctx.drawImage(v, 0, 0);
-      const image = cvs.toDataURL('image/jpeg', 0.7);
       try {
-        const d = await (
-          await fetch('/vision/inspect', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ image }),
-          })
-        ).json();
+        let d: { ok: boolean; result: string; defect_ratio: number };
+        if (camMode === 'url') {
+          // The vision service pulls the frame from the industrial camera.
+          d = await (await fetch('/vision/inspect_source', { method: 'POST' })).json();
+        } else {
+          const v = videoRef.current;
+          if (!v || !v.videoWidth) return;
+          const cvs = document.createElement('canvas');
+          cvs.width = v.videoWidth;
+          cvs.height = v.videoHeight;
+          const ctx = cvs.getContext('2d');
+          if (!ctx) return;
+          ctx.drawImage(v, 0, 0);
+          const image = cvs.toDataURL('image/jpeg', 0.7);
+          d = await (
+            await fetch('/vision/inspect', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ image }),
+            })
+          ).json();
+        }
         if (!alive || !d.ok) return;
         setVision({ result: d.result, defect: d.defect_ratio });
         ingest({ 'inspection.result': d.result, 'vision.defect': d.defect_ratio });
@@ -89,7 +133,7 @@ export function ProcessPanel({ open, onClose }: { open: boolean; onClose: () => 
       setVision(null);
       ingest({ 'inspection.result': null, 'vision.defect': null }); // revert to mock
     };
-  }, [camOn]);
+  }, [camOn, camMode]);
 
   React.useEffect(() => {
     if (!open) return;
@@ -243,7 +287,7 @@ export function ProcessPanel({ open, onClose }: { open: boolean; onClose: () => 
           )}
         </div>
 
-        {/* Inspection camera (real webcam feed) */}
+        {/* Inspection camera — webcam or industrial RTSP/MJPEG */}
         <div className="w-52 border-l border-cad-border p-2 flex flex-col">
           <div className="text-xs text-cad-text-muted mb-1 flex items-center justify-between">
             <span>Inspection cam · S2</span>
@@ -251,8 +295,39 @@ export function ProcessPanel({ open, onClose }: { open: boolean; onClose: () => 
               {camOn ? 'stop' : 'start'}
             </button>
           </div>
+          {/* source selector + URL (industrial camera) */}
+          <div className="mb-1 flex flex-col gap-1">
+            <div className="flex text-[10px] rounded overflow-hidden border border-cad-border">
+              {(['webcam', 'url'] as const).map((m) => (
+                <button
+                  key={m}
+                  disabled={camOn}
+                  onClick={() => setCamMode(m)}
+                  className={`flex-1 px-1 py-0.5 ${
+                    camMode === m ? 'bg-cad-accent/30 text-cad-text' : 'text-cad-text-muted'
+                  } disabled:opacity-50`}
+                >
+                  {m === 'webcam' ? 'Webcam' : 'RTSP/MJPEG'}
+                </button>
+              ))}
+            </div>
+            {camMode === 'url' && (
+              <input
+                value={camUrl}
+                onChange={(e) => setCamUrl(e.target.value)}
+                disabled={camOn}
+                placeholder="rtsp://… or http://…/mjpeg"
+                className="text-[10px] px-1 py-0.5 rounded bg-cad-bg border border-cad-border text-cad-text disabled:opacity-50"
+              />
+            )}
+          </div>
           <div className="relative flex-1 bg-black rounded overflow-hidden flex items-center justify-center">
-            <video ref={videoRef} muted playsInline className="w-full h-full object-cover" />
+            {camMode === 'url' ? (
+              // MJPEG preview of the server-side industrial camera.
+              camOn && <img src="/vision/stream" alt="camera" className="w-full h-full object-cover" />
+            ) : (
+              <video ref={videoRef} muted playsInline className="w-full h-full object-cover" />
+            )}
             {!camOn && (
               <span className="absolute text-[11px] text-cad-text-muted px-2 text-center">
                 {camErr ?? 'camera off'}

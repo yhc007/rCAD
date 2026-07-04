@@ -12,10 +12,25 @@ and runs a real OpenCV quality check on a centre ROI:
 Returns `{ok, result: PASS|FAIL, reason, defect_ratio, sharpness, brightness,
 annotated}` where `annotated` is the frame with the ROI + verdict drawn on it.
 
-The web client (Process Twin "Inspection cam" tile) grabs a webcam frame every
-~1.5 s, calls this service, and feeds the verdict back into the twin via
-`/api/telemetry/ingest` (overriding the mock inspection), so the 3D part colour
-and QC counts reflect the real camera.
+## Two camera sources
+
+- **Browser webcam** — the client captures a frame and POSTs `/inspect` (base64).
+- **Industrial camera (RTSP / MJPEG URL)** — the browser can't play RTSP, so the
+  service opens the stream itself with OpenCV:
+  - `POST /camera {url}` — connect to an `rtsp://…` or `http://…/mjpeg` stream
+    (or `{url:null}` to disconnect); a background thread keeps the latest frame.
+  - `GET /camera` — `{url, connected, error}`.
+  - `POST /inspect_source` — inspect the current industrial-camera frame.
+  - `GET /snapshot` — latest frame as JPEG.
+  - `GET /stream` — the camera re-encoded as same-origin MJPEG, so the browser
+    can preview an RTSP camera it could never play directly.
+
+  RTSP uses TCP transport (`OPENCV_FFMPEG_CAPTURE_OPTIONS=rtsp_transport;tcp`).
+
+The web client (Process Twin "Inspection cam" tile) picks a source (webcam or an
+RTSP/MJPEG URL), inspects a frame every ~1.5 s, and feeds the verdict back into
+the twin via `/api/telemetry/ingest`, so the 3D part colour, QC counts, and the
+inspect-station routing (pack vs reject) reflect the real camera.
 
 ## Run
 
