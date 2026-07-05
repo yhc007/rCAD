@@ -1,0 +1,10 @@
+[project]
+name = "rcad-step"
+version = "0.1.0"
+description = "OpenCASCADE STEP/IGES import service for rCAD (STEP -> glTF)"
+requires-python = ">=3.10,<3.15"
+dependencies = [
+    "fastapi>=0.110",
+    "uvicorn>=0.29",
+    "cadquery-ocp>=7.7",  # OpenCASCADE (OCCT) Python bindings — the reference STEP kernel
+]

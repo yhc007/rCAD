@@ -58,26 +58,52 @@ pub(crate) fn merge_meshes(meshes: &[rcad_geometry::Mesh]) -> ImportResponse {
     }
 }
 
-/// Import a STEP file → tessellated mesh (truck-stepio, pure Rust).
+/// Import a STEP file → coloured parts. Prefers the OpenCASCADE sidecar (the
+/// reference STEP kernel — handles complex commercial AP242 assemblies and keeps
+/// per-part colours), and falls back to the pure-Rust truck-stepio parser when
+/// the service is unavailable. Returns the same `GltfResponse` shape as glTF, so
+/// the client renders both identically.
 pub async fn import_step(mut multipart: Multipart) -> impl IntoResponse {
     let Some(data) = read_file_field(&mut multipart).await else {
-        return Json(ImportResponse::error("No file provided"));
+        return Json(gltf_error("No file provided"));
     };
     tracing::info!("Importing STEP file, {} bytes", data.len());
 
+    // Preferred path: OpenCASCADE → glb → coloured parts.
+    match step_via_occt(&data).await {
+        Ok(parts) => {
+            tracing::info!("STEP imported via OpenCASCADE: {} part(s)", parts.len());
+            return Json(GltfResponse {
+                success: true,
+                message: format!("imported {} part(s) via OpenCASCADE", parts.len()),
+                parts,
+            });
+        }
+        Err(e) => tracing::warn!("OpenCASCADE STEP service failed ({e}); trying truck-stepio"),
+    }
+
+    // Fallback: pure-Rust truck-stepio (subset parser; no colours).
     match rcad_io::step::import_from_bytes(&data) {
         Ok(meshes) => {
-            let resp = merge_meshes(&meshes);
-            tracing::info!(
-                "STEP imported: {} vertices, {} triangles",
-                resp.vertex_count,
-                resp.triangle_count
-            );
-            Json(resp)
+            let m = merge_meshes(&meshes);
+            tracing::info!("STEP imported via truck-stepio fallback: {} tris", m.triangle_count);
+            Json(GltfResponse {
+                success: true,
+                message: "imported via truck-stepio (fallback)".into(),
+                parts: vec![GltfPart {
+                    name: "STEP".into(),
+                    color: None,
+                    positions: m.positions,
+                    normals: m.normals,
+                    indices: m.indices,
+                }],
+            })
         }
         Err(e) => {
-            tracing::warn!("STEP import failed: {e}");
-            Json(ImportResponse::error(format!("STEP import failed: {e}")))
+            tracing::warn!("STEP import failed (OCCT service + truck both failed): {e}");
+            Json(gltf_error(format!(
+                "STEP import failed. Start the OpenCASCADE service (services/rcad-step) for complex files. Fallback error: {e}"
+            )))
         }
     }
 }
@@ -115,25 +141,15 @@ fn part_color(c: [f32; 4]) -> Option<[f32; 3]> {
     }
 }
 
-/// Import a glTF/GLB file → one mesh part per material, each with its colour.
-/// Handy for models converted from formats truck-stepio can't read (e.g. a
-/// complex STEP exported to GLB by FreeCAD). Original units are preserved.
-pub async fn import_gltf(mut multipart: Multipart) -> impl IntoResponse {
-    let Some(data) = read_file_field(&mut multipart).await else {
-        return Json(gltf_error("No file provided"));
-    };
-    tracing::info!("Importing glTF file, {} bytes", data.len());
-
+/// Parse glTF/GLB bytes into one renderable part per material (each keeps its
+/// colour). Shared by the glTF endpoint and the STEP path (which converts STEP
+/// to glb via OpenCASCADE first).
+fn gltf_bytes_to_parts(data: &[u8]) -> Result<Vec<GltfPart>, String> {
     let opts = rcad_io::ImportOptions::new(); // scale = 1.0, keep the model's units
-    let model = match rcad_io::gltf::import(std::io::Cursor::new(&data), &opts) {
-        Ok(m) => m,
-        Err(e) => {
-            tracing::warn!("glTF import failed: {e}");
-            return Json(gltf_error(format!("glTF import failed: {e}")));
-        }
-    };
+    let model = rcad_io::gltf::import(std::io::Cursor::new(data), &opts)
+        .map_err(|e| format!("glTF parse failed: {e}"))?;
     if model.meshes.is_empty() {
-        return Json(gltf_error("glTF file contained no meshes"));
+        return Err("model contained no meshes".to_string());
     }
 
     // Group geometry by material so each colour becomes its own part.
@@ -154,8 +170,53 @@ pub async fn import_gltf(mut multipart: Multipart) -> impl IntoResponse {
         let color = mat.and_then(|mat| part_color(mat.base_color));
         parts.push(GltfPart { name, color, positions: m.positions, normals: m.normals, indices: m.indices });
     }
-    tracing::info!("glTF imported: {} part(s)", parts.len());
-    Json(GltfResponse { success: true, message: "imported".into(), parts })
+    Ok(parts)
+}
+
+/// Convert STEP bytes to coloured parts via the OpenCASCADE sidecar
+/// (`services/rcad-step`): STEP → glb (colours + assembly preserved) → parts.
+async fn step_via_occt(data: &[u8]) -> Result<Vec<GltfPart>, String> {
+    let url = std::env::var("STEP_SERVICE_URL")
+        .unwrap_or_else(|_| "http://127.0.0.1:8002/convert".to_string());
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(600)) // big assemblies tessellate slowly
+        .build()
+        .map_err(|e| e.to_string())?;
+    let resp = client
+        .post(&url)
+        .header("Content-Type", "application/octet-stream")
+        .body(data.to_vec())
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        let code = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("OCCT service {code}: {body}"));
+    }
+    let glb = resp.bytes().await.map_err(|e| e.to_string())?;
+    gltf_bytes_to_parts(&glb)
+}
+
+/// Import a glTF/GLB file → one mesh part per material, each with its colour.
+/// Handy for models converted from formats truck-stepio can't read (e.g. a
+/// complex STEP exported to GLB by FreeCAD). Original units are preserved.
+pub async fn import_gltf(mut multipart: Multipart) -> impl IntoResponse {
+    let Some(data) = read_file_field(&mut multipart).await else {
+        return Json(gltf_error("No file provided"));
+    };
+    tracing::info!("Importing glTF file, {} bytes", data.len());
+
+    match gltf_bytes_to_parts(&data) {
+        Ok(parts) => {
+            tracing::info!("glTF imported: {} part(s)", parts.len());
+            Json(GltfResponse { success: true, message: "imported".into(), parts })
+        }
+        Err(e) => {
+            tracing::warn!("glTF import failed: {e}");
+            Json(gltf_error(format!("glTF import failed: {e}")))
+        }
+    }
 }
 
 /// IGES import is not supported (no pure-Rust IGES parser; needs OpenCASCADE).
